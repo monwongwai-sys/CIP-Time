@@ -60,7 +60,7 @@ def get_data_pi(tag_path, auth, start_time):
         return df[['Time', 'Val']].dropna().sort_values('Time')
     except: return pd.DataFrame(columns=['Time', 'Val'])
 
-def process_logic(temp_df, cip_df, target_t, min_m, c_min, c_max):
+def process_logic(temp_df, cip_df, target_t, min_m):
     history = []
     GAP_MIN = 60 
     raw_p = []
@@ -72,6 +72,7 @@ def process_logic(temp_df, cip_df, target_t, min_m, c_min, c_max):
             raw_p.append({'Start': s_t, 'End': row['Time']})
             active = False
     if not raw_p: return []
+    
     merged = []
     curr = raw_p[0]
     for next_p in raw_p[1:]:
@@ -80,14 +81,28 @@ def process_logic(temp_df, cip_df, target_t, min_m, c_min, c_max):
         else:
             merged.append(curr); curr = next_p
     merged.append(curr)
+    
     for p in merged:
         dur = (p['End'] - p['Start']).total_seconds() / 60
         if dur >= 5:
             avg_t = round(temp_df.loc[(temp_df['Time'] >= p['Start']) & (temp_df['Time'] <= p['End']), 'Val'].mean(), 1)
             c_vals = cip_df.loc[(cip_df['Time'] >= p['Start']) & (cip_df['Time'] <= p['End']), 'Val']
+            
+            # เก็บค่าเฉลี่ย %CIP ไว้แสดงผล แต่ไม่ใช้ตัดสิน PASS/FAIL
             avg_c = round(c_vals.mean(), 2) if not c_vals.empty else (round(cip_df[cip_df['Time'] <= p['Start']].iloc[-1]['Val'], 2) if not cip_df[cip_df['Time'] <= p['Start']].empty else 0.0)
-            is_pass = (dur >= min_m) and (c_min <= avg_c <= c_max)
-            history.append({"Start": p['Start'], "End": p['End'], "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"), "Duration": round(dur, 1), "AvgTemp": avg_t, "AvgCIP": avg_c, "Status": "PASS" if is_pass else "FAIL"})
+            
+            # เงื่อนไข PASS/FAIL: เช็คแค่ "เวลา" เท่านั้น
+            is_pass = (dur >= min_m)
+            
+            history.append({
+                "Start": p['Start'], 
+                "End": p['End'], 
+                "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"), 
+                "Duration": round(dur, 1), 
+                "AvgTemp": avg_t, 
+                "AvgCIP": avg_c, 
+                "Status": "PASS" if is_pass else "FAIL"
+            })
     return history
 
 # --- 4. MAIN APP INTERFACE ---
@@ -108,7 +123,8 @@ if st.button("🚀 EXECUTE ANALYTICS"):
         df_cip_all = get_data_pi("BEB3-57-0100-CIP", auth, s_dt)
         for name, tag in TANK_MAP.items():
             df_temp = get_data_pi(tag, auth, s_dt)
-            hist = process_logic(df_temp, df_cip_all, t_tgt, m_tgt, 5.0, 10.0)
+            # เรียกใช้ logic ที่ปรับปรุงแล้ว (ไม่ส่ง c_min, c_max)
+            hist = process_logic(df_temp, df_cip_all, t_tgt, m_tgt)
             if hist:
                 total_runs = len(hist)
                 pass_runs = sum(1 for h in hist if "PASS" in h["Status"])
@@ -123,7 +139,7 @@ if st.button("🚀 EXECUTE ANALYTICS"):
                     "raw_cip": df_cip_all
                 }
 
-# --- 5. TANK CARDS & MODERN MINI GAUGE ---
+# --- 5. TANK CARDS ---
 if st.session_state.results:
     st.divider()
     cols = st.columns(4)
@@ -147,7 +163,7 @@ if st.session_state.results:
                 </div>
             """, unsafe_allow_html=True)
             
-            # --- CUSTOM MODERN GAUGE ---
+            # GAUGE
             fig = go.Figure(go.Indicator(
                 mode = "gauge+number",
                 value = p_rate,
@@ -160,8 +176,6 @@ if st.session_state.results:
             ))
             fig.update_layout(height=70, margin=dict(l=40, r=40, t=10, b=5), paper_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig, use_container_width=True, key=f"g_{name}", config={'displayModeBar': False})
-            
-            # Show Total & Pass Counts
             st.markdown(f'<div class="efficiency-text">Total: {data["total"]} | Pass: {data["pass"]}</div>', unsafe_allow_html=True)
             
             if st.button(f"🔍 VIEW HISTORY: {name}", key=f"btn_{name}", use_container_width=True):
@@ -175,28 +189,26 @@ if st.session_state.view_history:
     st.subheader(f"📊 Detailed Analytics: {sel}")
     
     hist_df = db["history_df"].sort_values("Start", ascending=False)
-    
-    # Selection for Graph
     opt = st.selectbox("Select Wash Cycle to View Trend:", hist_df.apply(lambda x: f"{x['StartTime']} | {x['Duration']}m | {x['Status']}", axis=1).tolist())
     r_data = hist_df[hist_df.apply(lambda x: f"{x['StartTime']} | {x['Duration']}m | {x['Status']}", axis=1) == opt].iloc[0]
     
-    # Trend Graph
+    # Trend Graph (ยังคงแสดงทั้ง Temp และ CIP)
     fig_t = make_subplots(specs=[[{"secondary_y": True}]])
     m_t = (db["raw_temp"]["Time"] >= r_data["Start"] - timedelta(minutes=20)) & (db["raw_temp"]["Time"] <= r_data["End"] + timedelta(minutes=20))
     m_c = (db["raw_cip"]["Time"] >= r_data["Start"] - timedelta(minutes=20)) & (db["raw_cip"]["Time"] <= r_data["End"] + timedelta(minutes=20))
+    
     fig_t.add_trace(go.Scatter(x=db["raw_temp"].loc[m_t, 'Time'], y=db["raw_temp"].loc[m_t, 'Val'], name="Temp (°C)", line=dict(color="#e74c3c", width=2.5)), secondary_y=False)
     fig_t.add_trace(go.Scatter(x=db["raw_cip"].loc[m_c, 'Time'], y=db["raw_cip"].loc[m_c, 'Val'], name="% CIP", line=dict(color="#3498db", dash='dot')), secondary_y=True)
-    fig_t.update_layout(title=f"Trend Analysis: {opt}", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    fig_t.update_layout(title=f"Trend Analysis: {opt}", hovermode="x unified")
     st.plotly_chart(fig_t, use_container_width=True)
     
-    # Styled Historical Log Table
+    # Historical Log
     st.write("#### 📝 Historical Log")
-    
     def color_status(val):
         color = '#28a745' if val == "PASS" else '#dc3545'
         return f'color: {color}; font-weight: bold'
 
-    styled_df = hist_df.drop(columns=["Start", "End"]).style.applymap(color_status, subset=['Status'])
+    styled_df = hist_df.drop(columns=["Start", "End"]).style.map(color_status, subset=['Status'])
     st.dataframe(styled_df, use_container_width=True)
     
     if st.button("✖️ CLOSE PANEL"):
