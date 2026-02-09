@@ -43,10 +43,10 @@ if "results" not in st.session_state: st.session_state.results = {}
 if "view_history" not in st.session_state: st.session_state.view_history = None
 
 TANK_MAP = {
-    "Tank 421": "BEB3-10-0400-TT421", "Tank 422B": "BEB3-10-0400-TT422B",
-    "Tank 423B": "BEB3-10-0400-TT423B", "Tank 424B": "BEB3-10-0400-TT424B",
-    "Tank 425B": "BEB3-10-0400-TT425B", "Tank 426B": "BEB3-10-0400-TT426B",
-    "Tank 427B": "BEB3-10-0400-TT427B"
+    "Tank 421": "BEB3-10-0400-TT421", "Tank 422": "BEB3-10-0400-TT422B",
+    "Tank 423": "BEB3-10-0400-TT423B", "Tank 424": "BEB3-10-0400-TT424B",
+    "Tank 425": "BEB3-10-0400-TT425B", "Tank 426": "BEB3-10-0400-TT426B",
+    "Tank 427": "BEB3-10-0400-TT427B"
 }
 
 # --- 3. DATA LOGIC ---
