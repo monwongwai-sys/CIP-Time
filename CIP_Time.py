@@ -7,35 +7,18 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import urllib3
 
-# Disable Insecure Request Warnings
+# Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 1. CONFIG & UI STYLE (ULTRA CLEAN VERSION) ---
+# --- 1. CONFIG & UI STYLE ---
 st.set_page_config(page_title="CIP Monitoring & Analytics Pro", layout="wide")
 
+# Custom CSS to hide the Streamlit "Deploy" button and hamburger menu
 st.markdown("""
     <style>
-    /* 1. ลบแถบเครื่องมือด้านบนสุด (GitHub, Edit, Star, Menu) */
-    header[data-testid="stHeader"] {
-        display: none !important;
-    }
-    
-    /* 2. ลบปุ่ม Manage app สีดำที่มุมขวาล่าง */
-    .stAppDeployButton {
-        display: none !important;
-    }
-    
-    /* 3. ลบ Footer และแถบสถานะด้านล่าง */
-    footer {visibility: hidden !important;}
-    [data-testid="stStatusWidget"] {display: none !important;}
-
-    /* 4. ปรับเนื้อหาให้ชิดขอบบนสุด */
-    .block-container {
-        padding-top: 0rem !important;
-        padding-bottom: 0rem !important;
-    }
-
-    /* 5. สไตล์การแสดงผล Tank Card */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
     .tank-card {
         border-radius: 15px; padding: 20px; text-align: center;
         background-color: #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
@@ -52,9 +35,6 @@ st.markdown("""
         border: 1px solid #d6eaf8; margin-top: 8px;
     }
     .efficiency-text { font-size: 0.85em; font-weight: bold; color: #5d6d7e; margin-top: -10px; }
-    
-    /* ซ่อนปุ่มลูกศร Sidebar เพื่อความคลีน */
-    [data-testid="sidebar-collapse-button"] {display: none !important;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -69,37 +49,53 @@ TANK_MAP = {
     "Tank 427B": "BEB3-10-0400-TT427B"
 }
 
-# --- 3. DATA & ANALYTICS LOGIC ---
+# --- 3. DATA LOGIC ---
 def get_data_pi(tag_path, auth, start_time):
     try:
         PI_BASE = "https://piazu.mitrphol.com/piwebapi"
         r = requests.get(f"{PI_BASE}/points", params={"path": f"\\\\MPAZU-PIDCDB\\{tag_path}"}, auth=auth, verify=False, timeout=15)
-        if r.status_code != 200: return pd.DataFrame(columns=['Time', 'Val'])
         
+        if r.status_code == 401:
+            st.error(f"❌ Login Failed (401): Invalid Credentials")
+            return None
+        if r.status_code != 200:
+            st.error(f"⚠️ PI Error: Tag {tag_path} not found (Status: {r.status_code})")
+            return pd.DataFrame(columns=['Time', 'Val'])
+            
         webid = r.json()["WebId"]
         start_str = start_time.strftime("%Y-%m-%dT00:00:00Z")
         r_data = requests.get(f"{PI_BASE}/streams/{webid}/recorded", params={"startTime": start_str, "endTime": "*", "maxCount": 50000}, auth=auth, verify=False, timeout=25)
         
         items = r_data.json().get("Items", [])
         if not items: return pd.DataFrame(columns=['Time', 'Val'])
-        
+            
         df = pd.DataFrame(items)
         df['Time'] = pd.to_datetime(df['Timestamp'], format='ISO8601').dt.tz_localize(None)
-        df['Val'] = pd.to_numeric(df['Value'].apply(lambda x: x.get('Value') if isinstance(x, dict) else x), errors='coerce')
+        
+        def clean_val(x):
+            if isinstance(x, dict): return x.get('Value')
+            return x
+            
+        df['Val'] = pd.to_numeric(df['Value'].apply(clean_val), errors='coerce')
         return df[['Time', 'Val']].dropna().sort_values('Time')
-    except: return pd.DataFrame(columns=['Time', 'Val'])
+    except Exception as e:
+        st.error(f"🚨 Connection Error: {str(e)}")
+        return pd.DataFrame(columns=['Time', 'Val'])
 
 def process_logic(temp_df, cip_df, target_t, min_m):
     history = []
     GAP_MIN = 60 
-    raw_p = []
-    active, s_t = False, None
+    raw_p, active, s_t = [], False, None
+
+    if temp_df.empty: return []
+
     for _, row in temp_df.iterrows():
         if row['Val'] > target_t and not active:
             active, s_t = True, row['Time']
         elif row['Val'] <= target_t and active:
             raw_p.append({'Start': s_t, 'End': row['Time']})
             active = False
+            
     if not raw_p: return []
     
     merged = []
@@ -117,41 +113,60 @@ def process_logic(temp_df, cip_df, target_t, min_m):
             avg_t = round(temp_df.loc[(temp_df['Time'] >= p['Start']) & (temp_df['Time'] <= p['End']), 'Val'].mean(), 1)
             c_vals = cip_df.loc[(cip_df['Time'] >= p['Start']) & (cip_df['Time'] <= p['End']), 'Val']
             avg_c = round(c_vals.mean(), 2) if not c_vals.empty else (round(cip_df[cip_df['Time'] <= p['Start']].iloc[-1]['Val'], 2) if not cip_df[cip_df['Time'] <= p['Start']].empty else 0.0)
-            
-            # PASS ถ้าเวลาถึงเกณฑ์ (ไม่เช็ค %CIP)
             is_pass = (dur >= min_m)
-            history.append({"Start": p['Start'], "End": p['End'], "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"), "Duration": round(dur, 1), "AvgTemp": avg_t, "AvgCIP": avg_c, "Status": "PASS" if is_pass else "FAIL"})
+            
+            history.append({
+                "Start": p['Start'], "End": p['End'], 
+                "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"), 
+                "Duration": round(dur, 1), "AvgTemp": avg_t, 
+                "AvgCIP": avg_c, "Status": "PASS" if is_pass else "FAIL"
+            })
     return history
 
-# --- 4. MAIN APP INTERFACE ---
-st.title("🛡️ CIP Performance Monitoring")
+# --- 4. MAIN INTERFACE ---
+st.title("🛡️ CIP Performance Monitoring & Analytics")
 
-with st.sidebar:
-    st.header("🔑 Credentials")
-    user = st.text_input("Username")
-    pw = st.text_input("Password", type="password")
-    st.divider()
-    t_tgt = st.number_input("Target Temp (°C)", value=65.0)
-    m_tgt = st.number_input("Min Duration (Min)", value=40.0)
-    
-    # แก้ไขจุดนี้: ตั้งค่าเริ่มต้นของ Start Date เป็น 1/1/2026
-    s_dt = st.date_input("Start Date", value=pd.to_datetime("2026-01-01"))
+# Settings & Login Section on Main Page
+with st.expander("🔑 SYSTEM ACCESS & THRESHOLD SETTINGS", expanded=True):
+    set_col1, set_col2, set_col3 = st.columns([1, 1, 1])
+    with set_col1:
+        user = st.text_input("Username", placeholder="e.g. mp\yourname")
+        pw = st.text_input("Password", type="password")
+    with set_col2:
+        t_tgt = st.number_input("Target Temp (°C)", value=65.0)
+        m_tgt = st.number_input("Min Duration (Min)", value=40.0)
+    with set_col3:
+        # Default Start Date: 2026-01-01
+        s_dt = st.date_input("Start Date", value=datetime(2026, 1, 1))
+        st.write("") # Spacer
+        execute_btn = st.button("🚀 EXECUTE ANALYTICS", use_container_width=True)
 
-if st.button("🚀 EXECUTE ANALYTICS", use_container_width=True):
-    auth = HTTPBasicAuth(user, pw)
-    with st.spinner("Crunching PI System Data..."):
-        df_cip_all = get_data_pi("BEB3-57-0100-CIP", auth, s_dt)
-        for name, tag in TANK_MAP.items():
-            df_temp = get_data_pi(tag, auth, s_dt)
-            hist = process_logic(df_temp, df_cip_all, t_tgt, m_tgt)
-            if hist:
-                total_runs = len(hist)
-                pass_runs = sum(1 for h in hist if "PASS" in h["Status"])
-                st.session_state.results[name] = {
-                    "summary": hist[-1], "p_rate": round((pass_runs / total_runs) * 100, 1), 
-                    "total": total_runs, "pass": pass_runs,
-                    "history_df": pd.DataFrame(hist), "raw_temp": df_temp, "raw_cip": df_cip_all
-                }
+if execute_btn:
+    if not user or not pw:
+        st.warning("⚠️ Please enter Username and Password.")
+    else:
+        auth = HTTPBasicAuth(user, pw)
+        st.session_state.results = {}
+        
+        with st.spinner("🔄 Fetching data from PI System..."):
+            df_cip_all = get_data_pi("BEB3-57-0100-CIP", auth, s_dt)
+            if df_cip_all is not None:
+                found_any = False
+                for name, tag in TANK_MAP.items():
+                    df_temp = get_data_pi(tag, auth, s_dt)
+                    if df_temp is not None and not df_temp.empty:
+                        hist = process_logic(df_temp, df_cip_all, t_tgt, m_tgt)
+                        if hist:
+                            found_any, total_runs = True, len(hist)
+                            pass_runs = sum(1 for h in hist if "PASS" in h["Status"])
+                            st.session_state.results[name] = {
+                                "summary": hist[-1], 
+                                "p_rate": round((pass_runs / total_runs) * 100, 1), 
+                                "total": total_runs, "pass": pass_runs,
+                                "history_df": pd.DataFrame(hist), "raw_temp": df_temp, "raw_cip": df_cip_all
+                            }
+                if not found_any:
+                    st.info("ℹ️ No cleaning cycles found for the selected period.")
 
 # --- 5. DASHBOARD ---
 if st.session_state.results:
@@ -177,35 +192,42 @@ if st.session_state.results:
                 </div>
             """, unsafe_allow_html=True)
             
-            fig = go.Figure(go.Indicator(mode="gauge+number", value=data["p_rate"], number={'suffix': "%", 'font': {'size': 20, 'color': rate_color}}, gauge={'axis': {'range': [None, 100], 'visible': False}, 'bar': {'color': rate_color}}))
-            fig.update_layout(height=70, margin=dict(l=40, r=40, t=10, b=5), paper_bgcolor='rgba(0,0,0,0)')
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number", value=data["p_rate"],
+                number={'suffix': "%", 'font': {'size': 20, 'color': rate_color}},
+                gauge={'axis': {'range': [None, 100], 'visible': False}, 'bar': {'color': rate_color}}
+            ))
+            fig.update_layout(height=80, margin=dict(l=30, r=30, t=10, b=10), paper_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig, use_container_width=True, key=f"g_{name}", config={'displayModeBar': False})
             st.markdown(f'<div class="efficiency-text">Total: {data["total"]} | Pass: {data["pass"]}</div>', unsafe_allow_html=True)
             
             if st.button(f"🔍 HISTORY: {name}", key=f"btn_{name}", use_container_width=True):
                 st.session_state.view_history = name
 
-# --- 6. HISTORY ---
+# --- 6. HISTORY EXPLORER ---
 if st.session_state.view_history:
     sel = st.session_state.view_history
     db = st.session_state.results[sel]
     st.divider()
-    st.subheader(f"📊 Detailed Analytics: {sel}")
+    st.subheader(f"📊 Detailed History: {sel}")
+    
     hist_df = db["history_df"].sort_values("Start", ascending=False)
-    opt = st.selectbox("Select Wash Cycle:", hist_df.apply(lambda x: f"{x['StartTime']} | {x['Duration']}m | {x['Status']}", axis=1).tolist())
+    opt = st.selectbox("Select Cycle Trend:", hist_df.apply(lambda x: f"{x['StartTime']} | {x['Duration']}m | {x['Status']}", axis=1).tolist())
     r_data = hist_df[hist_df.apply(lambda x: f"{x['StartTime']} | {x['Duration']}m | {x['Status']}", axis=1) == opt].iloc[0]
     
     fig_t = make_subplots(specs=[[{"secondary_y": True}]])
     m_t = (db["raw_temp"]["Time"] >= r_data["Start"] - timedelta(minutes=15)) & (db["raw_temp"]["Time"] <= r_data["End"] + timedelta(minutes=15))
     m_c = (db["raw_cip"]["Time"] >= r_data["Start"] - timedelta(minutes=15)) & (db["raw_cip"]["Time"] <= r_data["End"] + timedelta(minutes=15))
+    
     fig_t.add_trace(go.Scatter(x=db["raw_temp"].loc[m_t, 'Time'], y=db["raw_temp"].loc[m_t, 'Val'], name="Temp (°C)", line=dict(color="#e74c3c", width=2.5)), secondary_y=False)
     fig_t.add_trace(go.Scatter(x=db["raw_cip"].loc[m_c, 'Time'], y=db["raw_cip"].loc[m_c, 'Val'], name="% CIP", line=dict(color="#3498db", dash='dot')), secondary_y=True)
-    fig_t.update_layout(hovermode="x unified")
+    fig_t.update_layout(hovermode="x unified", title=f"Cleaning Trend: {r_data['StartTime']}")
     st.plotly_chart(fig_t, use_container_width=True)
     
+    st.write("#### 📝 History Log")
     styled_df = hist_df.drop(columns=["Start", "End"]).style.applymap(lambda x: 'color: #28a745; font-weight: bold' if x == "PASS" else 'color: #dc3545; font-weight: bold', subset=['Status'])
     st.dataframe(styled_df, use_container_width=True)
     
-    if st.button("✖️ CLOSE PANEL"):
+    if st.button("✖️ Close History"):
         st.session_state.view_history = None
         st.rerun()
