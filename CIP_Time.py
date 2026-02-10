@@ -184,7 +184,8 @@ if st.session_state.results:
                     <div style="font-size:0.75em; color:#7f8c8d; margin-top:-10px;">PASS {data['pass']}/{data['total']} </div>
                     <div class="metric-box">
                         ⏱️ <b>Time:</b> {res['TotalDuration']} min (<b>>{target_t} °C:</b> {res['TimeAboveTarget']} min)<br>
-                        🌡️ <b>Temp avg:</b> {res['AvgTemp']} °C | 🧪 <b>%CIP:</b> {res['AvgConc']}%<br>
+                        🌡️ <b>Temp avg:</b> {res['AvgTemp']} °C (<b>>{target_t} °C:</b> {res['AvgTempTarget']} °C)<br>
+                        🧪 <b>%CIP:</b> {res['AvgConc']}%<br>
                         🔥 <b>Max Temp:</b> {res['MaxTemp']}°C
                     </div>
                 </div>
