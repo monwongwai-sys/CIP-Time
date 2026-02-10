@@ -134,7 +134,7 @@ with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
         target_t = st.number_input("Target Temp (°C)", value=70.0)
         min_m = st.number_input("Target Duration (Min)", value=40.0)
     with c3:
-        s_dt = st.date_input("Start Date", value=datetime(2026, 1, 1))
+        s_dt = st.date_input("Start Date", value=datetime(2025, 12, 31))
         execute_btn = st.button("🚀 EXECUTE ANALYTICS", use_container_width=True)
 
 if execute_btn:
