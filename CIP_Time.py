@@ -18,6 +18,12 @@ if "view_history" not in st.session_state: st.session_state.view_history = None
 
 st.markdown("""
     <style>
+    /* ซ่อน Toolbar มุมขวาบน (GitHub, Share) */
+    header {visibility: hidden;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stDeployButton {display:none;}
+
     .tank-card {
         border-radius: 15px; padding: 15px; text-align: center;
         background-color: #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
@@ -26,6 +32,7 @@ st.markdown("""
     .status-pass { border-top-color: #28a745; }
     .status-fail { border-top-color: #dc3545; }
     .metric-box { text-align: left; font-size: 0.82em; background: #f8f9fa; padding: 10px; border-radius: 8px; margin-top: 10px; line-height: 1.6; }
+    .latest-time { font-size: 0.85em; color: #1a73e8; font-weight: bold; margin-bottom: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -60,9 +67,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
     
     if temp_df.empty: return []
 
-    # แก้ปัญหาค่า 0: ทำการ Sync เวลาของ Temp และ Conc เข้าด้วยกันก่อนประมวลผล
     if not conc_df.empty:
-        # ใช้ merge_asof เพื่อจับคู่ค่า Conc ที่ใกล้เคียงที่สุดก่อนเวลาของ Temp
         combined_df = pd.merge_asof(
             temp_df.sort_values('Time'), 
             conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), 
@@ -100,8 +105,6 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         acc_min = above_target['diff'].sum()
         avg_overall = this_cycle['Val'].mean()
         avg_target = above_target['Val'].mean() if not above_target.empty else 0
-        
-        # ดึงค่าเฉลี่ยของ %CIP จาก Column Conc ที่เรา Merge ไว้แล้ว
         avg_conc = this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0
         
         total_dur = (p['End'] - p['Start']).total_seconds() / 60
@@ -138,9 +141,7 @@ if execute_btn:
     auth = HTTPBasicAuth(user, pw)
     st.session_state.results = {}
     with st.spinner("🔄 Fetch data from the PI API..."):
-        # ดึงข้อมูล Concentration รวมเพียงรอบเดียว
         df_conc_all = get_data_pi(CIP_CONC_TAG, auth, s_dt)
-        
         for name, tag in TANK_MAP.items():
             df_temp = get_data_pi(tag, auth, s_dt)
             if not df_temp.empty:
@@ -176,6 +177,7 @@ if st.session_state.results:
             st.markdown(f"""
                 <div class="tank-card {'status-pass' if res['Status']=='PASS' else 'status-fail'}">
                     <h4 style="margin:0;">{name}</h4>
+                    <div class="latest-time">🕒 Latest: {res['StartTime']}</div>
             """, unsafe_allow_html=True)
             st.plotly_chart(fig_gauge, use_container_width=True, config={'displayModeBar': False}, key=f"gauge_{name}")
             st.markdown(f"""
