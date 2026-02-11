@@ -56,7 +56,10 @@ def get_data_pi(tag_path, auth, start_time):
         items = r_data.json().get("Items", [])
         if not items: return pd.DataFrame(columns=['Time', 'Val'])
         df = pd.DataFrame(items)
-        df['Time'] = pd.to_datetime(df['Timestamp'], format='ISO8601').dt.tz_localize(None)
+        
+        # แก้ไขจุดนี้: แปลงจาก UTC เป็น Asia/Bangkok (+7)
+        df['Time'] = pd.to_datetime(df['Timestamp'], format='ISO8601').dt.tz_convert('Asia/Bangkok').dt.tz_localize(None)
+        
         df['Val'] = pd.to_numeric(df['Value'].apply(lambda x: x.get('Value') if isinstance(x, dict) else x), errors='coerce')
         return df[['Time', 'Val']].dropna().sort_values('Time')
     except: return pd.DataFrame(columns=['Time', 'Val'])
