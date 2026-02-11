@@ -18,7 +18,6 @@ if "view_history" not in st.session_state: st.session_state.view_history = None
 
 st.markdown("""
     <style>
-    /* ซ่อน Toolbar มุมขวาบน (GitHub, Share) */
     header {visibility: hidden;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -28,14 +27,33 @@ st.markdown("""
         border-radius: 15px; padding: 15px; text-align: center;
         background-color: #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         margin-bottom: 10px; border-top: 8px solid #ddd;
+        display: flex; flex-direction: column; align-items: center;
     }
     .status-pass { border-top-color: #28a745; }
     .status-fail { border-top-color: #dc3545; }
-    .metric-box { text-align: left; font-size: 0.82em; background: #f8f9fa; padding: 10px; border-radius: 8px; margin-top: 10px; line-height: 1.6; }
-    .latest-time { font-size: 0.85em; color: #1a73e8; font-weight: bold; margin-bottom: 5px; }
+    
+    /* ปรับจูนตัวเลข % ให้ลงมากลางหน้าปัดพอดี */
+    .gauge-container {
+        width: 100%;
+        margin-top: -15px; /* ดึงเข้าใกล้เวลา Latest */
+        position: relative;
+    }
+    
+    .gauge-percentage {
+        margin-top: -55px; /* ดึงตัวเลขลงมาให้อยู่กึ่งกลางวงโค้ง */
+        font-size: 26px;
+        font-weight: bold;
+        color: #2c3e50;
+        z-index: 10;
+        margin-bottom: 15px; /* เว้นระยะห่างจาก PASS x/x */
+    }
+
+    .metric-box { text-align: left; font-size: 0.82em; background: #f8f9fa; padding: 10px; border-radius: 8px; margin-top: 10px; line-height: 1.6; width: 100%; }
+    .latest-time { font-size: 0.85em; color: #1a73e8; font-weight: bold; margin-bottom: 0px; }
     </style>
     """, unsafe_allow_html=True)
 
+# (ส่วน TANK_MAP และ Data Logic เหมือนเดิมทั้งหมด)
 TANK_MAP = {
     "R421": "BEB3-10-0400-TT421", "R422": "BEB3-10-0400-TT422B",
     "R423": "BEB3-10-0400-TT423B", "R424": "BEB3-10-0400-TT424B",
@@ -44,7 +62,6 @@ TANK_MAP = {
 }
 CIP_CONC_TAG = "BEB3-57-0100-CIP"
 
-# --- 2. DATA LOGIC ---
 def get_data_pi(tag_path, auth, start_time):
     try:
         PI_BASE = "https://piazu.mitrphol.com/piwebapi"
@@ -56,10 +73,7 @@ def get_data_pi(tag_path, auth, start_time):
         items = r_data.json().get("Items", [])
         if not items: return pd.DataFrame(columns=['Time', 'Val'])
         df = pd.DataFrame(items)
-        
-        # แก้ไขจุดนี้: แปลงจาก UTC เป็น Asia/Bangkok (+7)
         df['Time'] = pd.to_datetime(df['Timestamp'], format='ISO8601').dt.tz_convert('Asia/Bangkok').dt.tz_localize(None)
-        
         df['Val'] = pd.to_numeric(df['Value'].apply(lambda x: x.get('Value') if isinstance(x, dict) else x), errors='coerce')
         return df[['Time', 'Val']].dropna().sort_values('Time')
     except: return pd.DataFrame(columns=['Time', 'Val'])
@@ -67,20 +81,11 @@ def get_data_pi(tag_path, auth, start_time):
 def process_logic(temp_df, conc_df, target_t, min_m):
     history = []
     TRIGGER_TEMP, MIN_DURATION, GAP_MIN = 40.0, 5.0, 45
-    
     if temp_df.empty: return []
-
     if not conc_df.empty:
-        combined_df = pd.merge_asof(
-            temp_df.sort_values('Time'), 
-            conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), 
-            on='Time', 
-            direction='backward'
-        )
+        combined_df = pd.merge_asof(temp_df.sort_values('Time'), conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), on='Time', direction='backward')
     else:
-        combined_df = temp_df.copy()
-        combined_df['Conc'] = 0
-
+        combined_df = temp_df.copy(); combined_df['Conc'] = 0
     raw_p, active, s_t = [], False, None
     for _, row in combined_df.iterrows():
         if row['Val'] > TRIGGER_TEMP and not active:
@@ -89,39 +94,29 @@ def process_logic(temp_df, conc_df, target_t, min_m):
             raw_p.append({'Start': s_t, 'End': row['Time']})
             active = False
     if not raw_p: return []
-    
     merged = []
     curr = raw_p[0]
     for next_p in raw_p[1:]:
         if (next_p['Start'] - curr['End']).total_seconds() / 60 <= GAP_MIN:
             curr['End'] = next_p['End']
-        else:
-            merged.append(curr); curr = next_p
+        else: merged.append(curr); curr = next_p
     merged.append(curr)
-    
     for p in merged:
         this_cycle = combined_df.loc[(combined_df['Time'] >= p['Start']) & (combined_df['Time'] <= p['End'])].copy()
         if this_cycle.empty: continue
         this_cycle['diff'] = this_cycle['Time'].diff().dt.total_seconds() / 60
         above_target = this_cycle[this_cycle['Val'] >= target_t]
-        
         acc_min = above_target['diff'].sum()
-        avg_overall = this_cycle['Val'].mean()
-        avg_target = above_target['Val'].mean() if not above_target.empty else 0
-        avg_conc = this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0
-        
-        total_dur = (p['End'] - p['Start']).total_seconds() / 60
-        if total_dur < MIN_DURATION: continue
-        
+        if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
         history.append({
             "Start": p['Start'], "End": p['End'],
             "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"),
-            "TotalDuration": round(total_dur, 1),
+            "TotalDuration": round((p['End'] - p['Start']).total_seconds() / 60, 1),
             "TimeAboveTarget": round(acc_min, 1),
             "MaxTemp": round(this_cycle['Val'].max(), 1),
-            "AvgTemp": round(avg_overall, 1),
-            "AvgTempTarget": round(avg_target, 1),
-            "AvgConc": round(avg_conc, 2),
+            "AvgTemp": round(this_cycle['Val'].mean(), 1),
+            "AvgTempTarget": round(above_target['Val'].mean() if not above_target.empty else 0, 1),
+            "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2),
             "Status": "PASS" if acc_min >= min_m else "FAIL"
         })
     return history
@@ -143,7 +138,7 @@ with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
 if execute_btn:
     auth = HTTPBasicAuth(user, pw)
     st.session_state.results = {}
-    with st.spinner("🔄 Fetch data from the PI API..."):
+    with st.spinner("🔄 Fetching data..."):
         df_conc_all = get_data_pi(CIP_CONC_TAG, auth, s_dt)
         for name, tag in TANK_MAP.items():
             df_temp = get_data_pi(tag, auth, s_dt)
@@ -164,35 +159,59 @@ if st.session_state.results:
     for i, (name, data) in enumerate(st.session_state.results.items()):
         res = data["summary"]
         with cols[i % 4]:
-            fig_gauge = go.Figure(go.Indicator(
-                mode = "gauge+number", 
+            fig_gauge = go.Figure()
+
+            # ปรับ domain ให้หน้าปัดมีขนาดกะทัดรัดและสมดุล
+            fig_gauge.add_trace(go.Indicator(
+                mode = "gauge", 
                 value = data['p_rate'],
-                number = {'suffix': "%", 'font': {'size': 22, 'color': "#2c3e50"}},
                 gauge = {
                     'axis': {'range': [0, 100], 'visible': False},
                     'bar': {'color': "#28a745" if data['p_rate'] >= 80 else "#dc3545"},
-                    'bgcolor': "#f1f1f1", 
-                    'borderwidth': 0
-                }
+                    'bgcolor': "#ececec", 
+                    'borderwidth': 0,
+                },
+                # ปรับ domain เพื่อคุมขนาดให้เล็กและอยู่กึ่งกลาง
+                domain = {'x': [1, 1], 'y': [1, 1]} 
             ))
-            fig_gauge.update_layout(height=110, margin=dict(l=15, r=15, t=10, b=10))
+
+            # วางตัวเลขไว้กึ่งกลางด้านล่างของหน้าปัด (ตรงฐานวงกลมพอดี)
+            fig_gauge.add_annotation(
+                x=0.5, 
+                y=0.01, # ตำแหน่งกึ่งกลางด้านล่างของส่วนโค้ง
+                text=f"<b>{data['p_rate']}%</b>",
+                showarrow=False,
+                font=dict(size=18, color="#2c3e50"),
+                xref="paper", yref="paper"
+            )
+
+            fig_gauge.update_layout(
+                height=85, # ความสูงที่กระชับที่สุด
+                margin=dict(l=0, r=0, t=0, b=0),
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                autosize=True
+            )
 
             st.markdown(f"""
                 <div class="tank-card {'status-pass' if res['Status']=='PASS' else 'status-fail'}">
-                    <h4 style="margin:0;">{name}</h4>
-                    <div class="latest-time">🕒 Latest: {res['StartTime']}</div>
+                    <h4 style="margin:0; font-size: 1.05em; color:#2c3e50;">{name}</h4>
+                    <div class="latest-time" style="font-size: 0.72em;">🕒 Latest: {res['StartTime']}</div>
             """, unsafe_allow_html=True)
+            
             st.plotly_chart(fig_gauge, use_container_width=True, config={'displayModeBar': False}, key=f"gauge_{name}")
+            
             st.markdown(f"""
-                    <div style="font-size:0.75em; color:#7f8c8d; margin-top:-10px;">PASS {data['pass']}/{data['total']} </div>
-                    <div class="metric-box">
-                        ⏱️ <b>Time:</b> {res['TotalDuration']} min (<b>>{target_t} °C:</b> {res['TimeAboveTarget']} min)<br>
-                        🌡️ <b>Temp avg:</b> {res['AvgTemp']} °C (<b>>{target_t} °C:</b> {res['AvgTempTarget']} °C)<br>
-                        🧪 <b>%CIP:</b> {res['AvgConc']}%<br>
-                        🔥 <b>Max Temp:</b> {res['MaxTemp']}°C
+                    <div style="font-size:0.68em; color:#7f8c8d; margin-top:-12px; margin-bottom:5px;">PASS {data['pass']}/{data['total']} </div>
+                    <div class="metric-box" style="padding: 8px; font-size: 0.75em;">
+                        ⏱️ <b>Time:</b> {res['TotalDuration']} min (<b>>{target_t}°C:</b> {res['TimeAboveTarget']} min)<br>
+                        🌡️ <b>Temp avg:</b> {res['AvgTemp']}°C (<b>>{target_t}°C:</b> {res['AvgTempTarget']}°C)<br>
+                        🔥 <b>Temp Max:</b> {res['MaxTemp']}°C<br>
+                        🧪 <b>%CIP:</b> {res['AvgConc']}%
                     </div>
                 </div>
             """, unsafe_allow_html=True)
+            
             if st.button(f"🔍 HISTORY: {name}", key=f"btn_{name}", use_container_width=True):
                 st.session_state.view_history = name
 
