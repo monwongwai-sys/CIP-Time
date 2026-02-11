@@ -10,8 +10,56 @@ import urllib3
 # ปิดคำเตือน SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- 1. CONFIG & UI STYLE ---
+# --- 1. CONFIG & DATA STRUCTURE ---
 st.set_page_config(page_title="CIP Monitoring & Analytics Pro", layout="wide")
+
+# ข้อมูล Tag ของแต่ละโรงงาน
+FACTORY_CONFIG = {
+    "PK1": {
+        "tags": {
+            "R421": "BEB1-10-0400A-TI421", "R422": "BEB1-10-0400A-TI422",
+            "R423": "BEB1-10-0400A-TI423", "R424": "BEB1-10-0400A-TI424",
+            "R424B": "BEB1-10-0400A-TI424B", "R425": "BEB1-10-0400A-TI425",
+            "R426": "BEB1-10-0400A-TI426"
+        },
+        "cip_tag": None
+    },
+    "PK2": {
+        "tags": {
+            "R421": "BEB1-10-0400B-TT421", "R422": "BEB1-10-0400B-TT422",
+            "R423": "BEB1-10-0400B-TT423", "R423B": "BEB1-10-0400B-TT423B",
+            "R424": "BEB1-10-0400B-TT424", "R425": "BEB1-10-0400B-TT425",
+            "R426": "BEB1-10-0400B-TT426"
+        },
+        "cip_tag": None
+    },
+    "KN": {
+        "tags": {
+            "R421": "OEO1-10-0400-TT421", "R422": "OEO1-10-0400-TT422",
+            "R423": "OEO1-10-0400-TT423", "R424": "OEO1-10-0400-TT424",
+            "R425": "OEO1-10-0400-TT425", "R426": "OEO1-10-0400-TT426",
+            "R427": "OEO1-10-0400-TT427"
+        },
+        "cip_tag": None
+    },
+    "DC": {
+        "tags": {
+            "R421": "BEB3-10-0400-TT421", "R422": "BEB3-10-0400-TT422B",
+            "R423": "BEB3-10-0400-TT423B", "R424": "BEB3-10-0400-TT424B",
+            "R425": "BEB3-10-0400-TT425B", "R426": "BEB3-10-0400-TT426B",
+            "R427": "BEB3-10-0400-TT427B"
+        },
+        "cip_tag": "BEB3-57-0100-CIP"
+    },
+    "MCE": {
+        "tags": {
+            "R421": "CEC1-10-0400-TI421", "R422": "CEC1-10-0400-TI422",
+            "R423": "CEC1-10-0400-TI423", "R424": "CEC1-10-0400-TI424",
+            "R425": "CEC1-10-0400-TI425", "R426": "CEC1-10-0400-TI426"
+        },
+        "cip_tag": None
+    }
+}
 
 if "results" not in st.session_state: st.session_state.results = {}
 if "view_history" not in st.session_state: st.session_state.view_history = None
@@ -22,7 +70,6 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .stDeployButton {display:none;}
-
     .tank-card {
         border-radius: 15px; padding: 15px; text-align: center;
         background-color: #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
@@ -31,38 +78,14 @@ st.markdown("""
     }
     .status-pass { border-top-color: #28a745; }
     .status-fail { border-top-color: #dc3545; }
-    
-    /* ปรับจูนตัวเลข % ให้ลงมากลางหน้าปัดพอดี */
-    .gauge-container {
-        width: 100%;
-        margin-top: -15px; /* ดึงเข้าใกล้เวลา Latest */
-        position: relative;
-    }
-    
-    .gauge-percentage {
-        margin-top: -55px; /* ดึงตัวเลขลงมาให้อยู่กึ่งกลางวงโค้ง */
-        font-size: 26px;
-        font-weight: bold;
-        color: #2c3e50;
-        z-index: 10;
-        margin-bottom: 15px; /* เว้นระยะห่างจาก PASS x/x */
-    }
-
+    .gauge-container { width: 100%; margin-top: -15px; position: relative; }
     .metric-box { text-align: left; font-size: 0.82em; background: #f8f9fa; padding: 10px; border-radius: 8px; margin-top: 10px; line-height: 1.6; width: 100%; }
     .latest-time { font-size: 0.85em; color: #1a73e8; font-weight: bold; margin-bottom: 0px; }
     </style>
     """, unsafe_allow_html=True)
 
-# (ส่วน TANK_MAP และ Data Logic เหมือนเดิมทั้งหมด)
-TANK_MAP = {
-    "R421": "BEB3-10-0400-TT421", "R422": "BEB3-10-0400-TT422B",
-    "R423": "BEB3-10-0400-TT423B", "R424": "BEB3-10-0400-TT424B",
-    "R425": "BEB3-10-0400-TT425B", "R426": "BEB3-10-0400-TT426B",
-    "R427": "BEB3-10-0400-TT427B"
-}
-CIP_CONC_TAG = "BEB3-57-0100-CIP"
-
 def get_data_pi(tag_path, auth, start_time):
+    if not tag_path: return pd.DataFrame(columns=['Time', 'Val'])
     try:
         PI_BASE = "https://piazu.mitrphol.com/piwebapi"
         r = requests.get(f"{PI_BASE}/points", params={"path": f"\\\\MPAZU-PIDCDB\\{tag_path}"}, auth=auth, verify=False, timeout=15)
@@ -82,10 +105,12 @@ def process_logic(temp_df, conc_df, target_t, min_m):
     history = []
     TRIGGER_TEMP, MIN_DURATION, GAP_MIN = 40.0, 5.0, 45
     if temp_df.empty: return []
+    
     if not conc_df.empty:
         combined_df = pd.merge_asof(temp_df.sort_values('Time'), conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), on='Time', direction='backward')
     else:
         combined_df = temp_df.copy(); combined_df['Conc'] = 0
+        
     raw_p, active, s_t = [], False, None
     for _, row in combined_df.iterrows():
         if row['Val'] > TRIGGER_TEMP and not active:
@@ -93,6 +118,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         elif row['Val'] <= TRIGGER_TEMP and active:
             raw_p.append({'Start': s_t, 'End': row['Time']})
             active = False
+            
     if not raw_p: return []
     merged = []
     curr = raw_p[0]
@@ -101,6 +127,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
             curr['End'] = next_p['End']
         else: merged.append(curr); curr = next_p
     merged.append(curr)
+    
     for p in merged:
         this_cycle = combined_df.loc[(combined_df['Time'] >= p['Start']) & (combined_df['Time'] <= p['End'])].copy()
         if this_cycle.empty: continue
@@ -108,6 +135,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         above_target = this_cycle[this_cycle['Val'] >= target_t]
         acc_min = above_target['diff'].sum()
         if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
+        
         history.append({
             "Start": p['Start'], "End": p['End'],
             "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"),
@@ -129,18 +157,24 @@ with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
         user = st.text_input("Username", value="")
         pw = st.text_input("Password", type="password")
     with c2:
+        factory_choice = st.selectbox("Select Factory", options=list(FACTORY_CONFIG.keys()), index=3) # Default to DC
         target_t = st.number_input("Target Temp (°C)", value=70.0)
-        min_m = st.number_input("Target Duration (Min)", value=40.0)
     with c3:
+        min_m = st.number_input("Target Duration (Min)", value=40.0)
         s_dt = st.date_input("Start Date", value=datetime(2025, 12, 31))
-        execute_btn = st.button("🚀 EXECUTE ANALYTICS", use_container_width=True)
+    execute_btn = st.button("🚀 EXECUTE ANALYTICS", use_container_width=True)
 
 if execute_btn:
     auth = HTTPBasicAuth(user, pw)
     st.session_state.results = {}
-    with st.spinner("🔄 Fetching data..."):
-        df_conc_all = get_data_pi(CIP_CONC_TAG, auth, s_dt)
-        for name, tag in TANK_MAP.items():
+    selected_tags = FACTORY_CONFIG[factory_choice]["tags"]
+    cip_tag = FACTORY_CONFIG[factory_choice]["cip_tag"]
+    
+    with st.spinner(f"🔄 Fetching data for {factory_choice}..."):
+        # ดึงข้อมูล Conc เฉพาะถ้ามี Tag กำหนดไว้
+        df_conc_all = get_data_pi(cip_tag, auth, s_dt) if cip_tag else pd.DataFrame(columns=['Time', 'Val'])
+        
+        for name, tag in selected_tags.items():
             df_temp = get_data_pi(tag, auth, s_dt)
             if not df_temp.empty:
                 hist = process_logic(df_temp, df_conc_all, target_t, min_m)
@@ -160,8 +194,6 @@ if st.session_state.results:
         res = data["summary"]
         with cols[i % 4]:
             fig_gauge = go.Figure()
-
-            # ปรับ domain ให้หน้าปัดมีขนาดกะทัดรัดและสมดุล
             fig_gauge.add_trace(go.Indicator(
                 mode = "gauge", 
                 value = data['p_rate'],
@@ -171,35 +203,20 @@ if st.session_state.results:
                     'bgcolor': "#ececec", 
                     'borderwidth': 0,
                 },
-                # ปรับ domain เพื่อคุมขนาดให้เล็กและอยู่กึ่งกลาง
-                domain = {'x': [1, 1], 'y': [1, 1]} 
+                domain = {'x': [0, 1], 'y': [0, 1]} 
             ))
-
-            # วางตัวเลขไว้กึ่งกลางด้านล่างของหน้าปัด (ตรงฐานวงกลมพอดี)
-            fig_gauge.add_annotation(
-                x=0.5, 
-                y=0.01, # ตำแหน่งกึ่งกลางด้านล่างของส่วนโค้ง
-                text=f"<b>{data['p_rate']}%</b>",
-                showarrow=False,
-                font=dict(size=18, color="#2c3e50"),
-                xref="paper", yref="paper"
-            )
-
-            fig_gauge.update_layout(
-                height=85, # ความสูงที่กระชับที่สุด
-                margin=dict(l=0, r=0, t=0, b=0),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                autosize=True
-            )
+            fig_gauge.add_annotation(x=0.5, y=0.01, text=f"<b>{data['p_rate']}%</b>", showarrow=False, font=dict(size=18, color="#2c3e50"))
+            fig_gauge.update_layout(height=100, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor='rgba(0,0,0,0)')
 
             st.markdown(f"""
                 <div class="tank-card {'status-pass' if res['Status']=='PASS' else 'status-fail'}">
                     <h4 style="margin:0; font-size: 1.05em; color:#2c3e50;">{name}</h4>
                     <div class="latest-time" style="font-size: 0.72em;">🕒 Latest: {res['StartTime']}</div>
             """, unsafe_allow_html=True)
-            
             st.plotly_chart(fig_gauge, use_container_width=True, config={'displayModeBar': False}, key=f"gauge_{name}")
+            
+            # แสดงค่า %CIP เฉพาะโรงงานที่มีข้อมูล (DC)
+            cip_display = f"{res['AvgConc']}%" if FACTORY_CONFIG[factory_choice]["cip_tag"] else "N/A"
             
             st.markdown(f"""
                     <div style="font-size:0.68em; color:#7f8c8d; margin-top:-12px; margin-bottom:5px;">PASS {data['pass']}/{data['total']} </div>
@@ -207,15 +224,14 @@ if st.session_state.results:
                         ⏱️ <b>Time:</b> {res['TotalDuration']} min (<b>>{target_t}°C:</b> {res['TimeAboveTarget']} min)<br>
                         🌡️ <b>Temp avg:</b> {res['AvgTemp']}°C (<b>>{target_t}°C:</b> {res['AvgTempTarget']}°C)<br>
                         🔥 <b>Temp Max:</b> {res['MaxTemp']}°C<br>
-                        🧪 <b>%CIP:</b> {res['AvgConc']}%
+                        🧪 <b>%CIP:</b> {cip_display}
                     </div>
                 </div>
             """, unsafe_allow_html=True)
-            
             if st.button(f"🔍 HISTORY: {name}", key=f"btn_{name}", use_container_width=True):
                 st.session_state.view_history = name
 
-    # --- 4.5 GLOBAL TIMELINE ---
+    # --- 4.5 GLOBAL TIMELINE (เหมือนต้นฉบับ 100%) ---
     st.divider()
     st.subheader("📅 CIP Timeline")
     all_data = []
@@ -244,21 +260,25 @@ if st.session_state.view_history:
     sel = st.session_state.view_history
     db = st.session_state.results[sel]
     st.divider()
-    st.subheader(f"📊 Detailed History: {sel}")
+    st.subheader(f"📊 Detailed History: {sel} ({factory_choice})")
     hist_df = pd.DataFrame(db["list"]).sort_values("StartTime", ascending=False)
     opt = st.selectbox("Select Cycle:", hist_df.apply(lambda x: f"{x['StartTime']} | {x['Status']}", axis=1).tolist())
     r_data = hist_df[hist_df.apply(lambda x: f"{x['StartTime']} | {x['Status']}", axis=1) == opt].iloc[0]
     
     fig_hist = make_subplots(specs=[[{"secondary_y": True}]])
     mask = (db["raw_temp"]["Time"] >= r_data["Start"] - timedelta(minutes=10)) & (db["raw_temp"]["Time"] <= r_data["End"] + timedelta(minutes=10))
-    conc_mask = (db["raw_conc"]["Time"] >= r_data["Start"] - timedelta(minutes=10)) & (db["raw_conc"]["Time"] <= r_data["End"] + timedelta(minutes=10))
     
     fig_hist.add_trace(go.Scatter(x=db["raw_temp"].loc[mask, 'Time'], y=db["raw_temp"].loc[mask, 'Val'], name="Temp (°C)", line=dict(color="#e74c3c", width=3)))
-    fig_hist.add_trace(go.Scatter(x=db["raw_conc"].loc[conc_mask, 'Time'], y=db["raw_conc"].loc[conc_mask, 'Val'], name="%CIP Conc", line=dict(color="#3498db", width=2, dash='dot')), secondary_y=True)
-    fig_hist.add_hline(y=target_t, line_dash="dash", line_color="green", annotation_text=f"Target {target_t}°C")
     
-    st.plotly_chart(fig_hist, use_container_width=True, key="history_detail_chart")
+    if not db["raw_conc"].empty:
+        conc_mask = (db["raw_conc"]["Time"] >= r_data["Start"] - timedelta(minutes=10)) & (db["raw_conc"]["Time"] <= r_data["End"] + timedelta(minutes=10))
+        fig_hist.add_trace(go.Scatter(x=db["raw_conc"].loc[conc_mask, 'Time'], y=db["raw_conc"].loc[conc_mask, 'Val'], name="%CIP Conc", line=dict(color="#3498db", width=2, dash='dot')), secondary_y=True)
+    
+    fig_hist.add_hline(y=target_t, line_dash="dash", line_color="green", annotation_text=f"Target {target_t}°C")
+    fig_hist.update_layout(xaxis_title="Time", yaxis_title="Temperature (°C)", yaxis2_title="% CIP Concentration")
+    
+    st.plotly_chart(fig_hist, use_container_width=True)
     st.dataframe(hist_df.drop(columns=["Start", "End"]), use_container_width=True)
-    if st.button("✖️ Close History", key="close_history_btn"):
+    if st.button("✖️ Close History"):
         st.session_state.view_history = None
         st.rerun()
