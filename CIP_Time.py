@@ -241,7 +241,7 @@ if st.session_state.results:
                     st.session_state.view_history = name
 
         st.divider()
-        st.subheader("📅 CIP Timeline (Interactive)")
+        st.subheader("📅 CIP Timeline")
         all_data = [dict(c, Tank=n) for n, d in st.session_state.results.items() if n != "_is_summary" for c in d["list"]]
         if all_data:
             df_all = pd.DataFrame(all_data).sort_values("Start")
@@ -256,7 +256,7 @@ if st.session_state.results:
     
     else:
         st.divider()
-        st.subheader("🌍 Summary All Plant (Interactive View)")
+        st.subheader("🌍 Summary All Plant")
         for f_name in FACTORY_CONFIG.keys():
             f_data = st.session_state.results.get(f_name, [])
             if f_data:
@@ -283,7 +283,7 @@ if st.session_state.view_history and st.session_state.view_history in st.session
     st.subheader(f"📊 Detailed History: {sel} ({db['factory']})")
     hist_df = pd.DataFrame(db["list"]).sort_values("StartTime", ascending=False)
     # แสดงเป็น No. แทน Cycle
-    opt = st.selectbox("เลือกรายการลำดับที่ (No.):", hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1).tolist())
+    opt = st.selectbox("Select Item (No.):", hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1).tolist())
     r_data = hist_df[hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1) == opt].iloc[0]
     
     fig_hist = make_subplots(specs=[[{"secondary_y": True}]])
