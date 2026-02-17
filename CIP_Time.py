@@ -13,7 +13,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- 1. CONFIG & DATA STRUCTURE ---
 st.set_page_config(page_title="CIP Monitoring & Analytics Pro", layout="wide")
 
-# ข้อมูล Tag ของแต่ละโรงงาน
 FACTORY_CONFIG = {
     "PK1": {
         "tags": {
@@ -78,9 +77,9 @@ st.markdown("""
     }
     .status-pass { border-top-color: #28a745; }
     .status-fail { border-top-color: #dc3545; }
-    .gauge-container { width: 100%; margin-top: -15px; position: relative; }
     .metric-box { text-align: left; font-size: 0.82em; background: #f8f9fa; padding: 10px; border-radius: 8px; margin-top: 10px; line-height: 1.6; width: 100%; }
     .latest-time { font-size: 0.85em; color: #1a73e8; font-weight: bold; margin-bottom: 0px; }
+    .summary-badge { padding: 5px 12px; border-radius: 20px; font-weight: bold; color: white; display: inline-block; margin-right: 5px; font-size: 0.8em; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -120,23 +119,28 @@ def process_logic(temp_df, conc_df, target_t, min_m):
             active = False
             
     if not raw_p: return []
-    merged = []
-    curr = raw_p[0]
+    merged, curr = [], raw_p[0]
     for next_p in raw_p[1:]:
         if (next_p['Start'] - curr['End']).total_seconds() / 60 <= GAP_MIN:
             curr['End'] = next_p['End']
         else: merged.append(curr); curr = next_p
     merged.append(curr)
     
+    # --- ปรับการนับลำดับใหม่ตรงนี้ ---
+    display_no = 1 
     for p in merged:
         this_cycle = combined_df.loc[(combined_df['Time'] >= p['Start']) & (combined_df['Time'] <= p['End'])].copy()
         if this_cycle.empty: continue
+        
         this_cycle['diff'] = this_cycle['Time'].diff().dt.total_seconds() / 60
         above_target = this_cycle[this_cycle['Val'] >= target_t]
         acc_min = above_target['diff'].sum()
+        
+        # กรองรอบที่สั้นเกินไปออก
         if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
         
         history.append({
+            "No": display_no, # เปลี่ยนจาก Cycle เป็น No และใช้ตัวนับใหม่
             "Start": p['Start'], "End": p['End'],
             "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"),
             "TotalDuration": round((p['End'] - p['Start']).total_seconds() / 60, 1),
@@ -147,6 +151,8 @@ def process_logic(temp_df, conc_df, target_t, min_m):
             "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2),
             "Status": "PASS" if acc_min >= min_m else "FAIL"
         })
+        display_no += 1 # เพิ่มลำดับเฉพาะเมื่อผ่านการกรองแล้ว
+        
     return history
 
 # --- 3. UI & EXECUTION ---
@@ -154,12 +160,9 @@ st.title("🛡️ CIP Performance Monitoring & Analytics")
 with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        user = st.text_input("Username", value="")
-        pw = st.text_input("Password", type="password")
+        user, pw = st.text_input("Username", value=""), st.text_input("Password", type="password")
     with c2:
-        # เพิ่ม Summary All Plant เข้าไปในลิสต์
-        factory_options = list(FACTORY_CONFIG.keys()) + ["Summary All Plant"]
-        factory_choice = st.selectbox("Select Factory", options=factory_options, index=3) # Default to DC
+        factory_choice = st.selectbox("Select Factory", options=list(FACTORY_CONFIG.keys()) + ["Summary All Plant"], index=3)
         target_t = st.number_input("Target Temp (°C)", value=70.0)
     with c3:
         min_m = st.number_input("Target Duration (Min)", value=40.0)
@@ -169,15 +172,13 @@ with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
 if execute_btn:
     auth = HTTPBasicAuth(user, pw)
     st.session_state.results = {}
+    st.session_state.view_history = None
     
-    # กรณีเลือกทีละโรงงานปกติ
     if factory_choice != "Summary All Plant":
-        selected_tags = FACTORY_CONFIG[factory_choice]["tags"]
-        cip_tag = FACTORY_CONFIG[factory_choice]["cip_tag"]
-        
+        f_conf = FACTORY_CONFIG[factory_choice]
         with st.spinner(f"🔄 Fetching data for {factory_choice}..."):
-            df_conc_all = get_data_pi(cip_tag, auth, s_dt) if cip_tag else pd.DataFrame(columns=['Time', 'Val'])
-            for name, tag in selected_tags.items():
+            df_conc_all = get_data_pi(f_conf["cip_tag"], auth, s_dt) if f_conf["cip_tag"] else pd.DataFrame(columns=['Time', 'Val'])
+            for name, tag in f_conf["tags"].items():
                 df_temp = get_data_pi(tag, auth, s_dt)
                 if not df_temp.empty:
                     hist = process_logic(df_temp, df_conc_all, target_t, min_m)
@@ -186,46 +187,33 @@ if execute_btn:
                         st.session_state.results[name] = {
                             "summary": hist[-1], "p_rate": round((passed/len(hist))*100, 1),
                             "total": len(hist), "pass": passed, "list": hist, 
-                            "raw_temp": df_temp, "raw_conc": df_conc_all,
-                            "factory": factory_choice
+                            "raw_temp": df_temp, "raw_conc": df_conc_all, "factory": factory_choice
                         }
-    # กรณีเลือก Summary All Plant
     else:
         st.session_state.results = {"_is_summary": True}
-        for f_name in FACTORY_CONFIG.keys():
+        for f_name, f_conf in FACTORY_CONFIG.items():
             st.session_state.results[f_name] = []
-            selected_tags = FACTORY_CONFIG[f_name]["tags"]
-            cip_tag = FACTORY_CONFIG[f_name]["cip_tag"]
             with st.spinner(f"🔄 Fetching all data: {f_name}..."):
-                df_conc_all = get_data_pi(cip_tag, auth, s_dt) if cip_tag else pd.DataFrame(columns=['Time', 'Val'])
-                for name, tag in selected_tags.items():
+                df_conc_all = get_data_pi(f_conf["cip_tag"], auth, s_dt) if f_conf["cip_tag"] else pd.DataFrame(columns=['Time', 'Val'])
+                for name, tag in f_conf["tags"].items():
                     df_temp = get_data_pi(tag, auth, s_dt)
                     if not df_temp.empty:
                         hist = process_logic(df_temp, df_conc_all, target_t, min_m)
                         for h in hist:
-                            h_copy = h.copy()
-                            h_copy["Tank"] = name
+                            h_copy = h.copy(); h_copy["Tank"] = name
                             st.session_state.results[f_name].append(h_copy)
 
 # --- 4. DASHBOARD RENDER ---
 if st.session_state.results:
-    # เช็คว่าเป็นโหมด Summary หรือโหมดปกติ
     if "_is_summary" not in st.session_state.results:
         st.divider()
         cols = st.columns(4)
         for i, (name, data) in enumerate(st.session_state.results.items()):
             res = data["summary"]
             with cols[i % 4]:
-                fig_gauge = go.Figure()
-                fig_gauge.add_trace(go.Indicator(
-                    mode = "gauge", 
-                    value = data['p_rate'],
-                    gauge = {
-                        'axis': {'range': [0, 100], 'visible': False},
-                        'bar': {'color': "#28a745" if data['p_rate'] >= 80 else "#dc3545"},
-                        'bgcolor': "#ececec", 
-                        'borderwidth': 0,
-                    },
+                fig_gauge = go.Figure(go.Indicator(
+                    mode = "gauge", value = data['p_rate'],
+                    gauge = {'axis': {'range': [0, 100], 'visible': False}, 'bar': {'color': "#28a745" if data['p_rate'] >= 80 else "#dc3545"}, 'bgcolor': "#ececec", 'borderwidth': 0},
                     domain = {'x': [0, 1], 'y': [0, 1]} 
                 ))
                 fig_gauge.add_annotation(x=0.5, y=0.01, text=f"<b>{data['p_rate']}%</b>", showarrow=False, font=dict(size=18, color="#2c3e50"))
@@ -234,16 +222,14 @@ if st.session_state.results:
                 st.markdown(f"""
                     <div class="tank-card {'status-pass' if res['Status']=='PASS' else 'status-fail'}">
                         <h4 style="margin:0; font-size: 1.05em; color:#2c3e50;">{name}</h4>
-                        <div class="latest-time" style="font-size: 0.72em;">🕒 Latest: {res['StartTime']}</div>
+                        <div class="latest-time">🕒 Latest: {res['StartTime']}</div>
                 """, unsafe_allow_html=True)
                 st.plotly_chart(fig_gauge, use_container_width=True, config={'displayModeBar': False}, key=f"gauge_{name}")
                 
-                f_choice = data["factory"]
-                cip_display = f"{res['AvgConc']}%" if FACTORY_CONFIG[f_choice]["cip_tag"] else "N/A"
-                
+                cip_display = f"{res['AvgConc']}%" if FACTORY_CONFIG[data["factory"]]["cip_tag"] else "N/A"
                 st.markdown(f"""
                         <div style="font-size:0.68em; color:#7f8c8d; margin-top:-12px; margin-bottom:5px;">PASS {data['pass']}/{data['total']} </div>
-                        <div class="metric-box" style="padding: 8px; font-size: 0.75em;">
+                        <div class="metric-box">
                             ⏱️ <b>Time:</b> {res['TotalDuration']} min (<b>>{target_t}°C:</b> {res['TimeAboveTarget']} min)<br>
                             🌡️ <b>Temp avg:</b> {res['AvgTemp']}°C (<b>>{target_t}°C:</b> {res['AvgTempTarget']}°C)<br>
                             🔥 <b>Temp Max:</b> {res['MaxTemp']}°C<br>
@@ -254,77 +240,59 @@ if st.session_state.results:
                 if st.button(f"🔍 HISTORY: {name}", key=f"btn_{name}", use_container_width=True):
                     st.session_state.view_history = name
 
-        # --- 4.5 GLOBAL TIMELINE (โหมดปกติ) ---
         st.divider()
-        st.subheader("📅 CIP Timeline")
-        all_data = []
-        for n, d in st.session_state.results.items():
-            if n == "_is_summary": continue
-            for c in d["list"]:
-                c_copy = c.copy(); c_copy["Tank"] = n
-                all_data.append(c_copy)
+        st.subheader("📅 CIP Timeline (Interactive)")
+        all_data = [dict(c, Tank=n) for n, d in st.session_state.results.items() if n != "_is_summary" for c in d["list"]]
         if all_data:
             df_all = pd.DataFrame(all_data).sort_values("Start")
             fig_timeline = go.Figure()
             for status, color in [("PASS", "#28a745"), ("FAIL", "#dc3545")]:
                 df_s = df_all[df_all["Status"] == status]
                 if not df_s.empty:
-                    fig_timeline.add_trace(go.Bar(
-                        x=df_s["Start"], y=df_s["TotalDuration"], name=status, marker_color=color,
-                        customdata=df_s[["Tank", "TimeAboveTarget", "AvgConc"]],
-                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>Duration: %{y}m<br>Time > Target: %{customdata[1]}m<br>Avg %CIP: %{customdata[2]}%<extra></extra>"
-                    ))
+                    fig_timeline.add_trace(go.Bar(x=df_s["Start"], y=df_s["TotalDuration"], name=status, marker_color=color, customdata=df_s[["Tank", "TimeAboveTarget", "AvgConc"]], hovertemplate="<b>Tank: %{customdata[0]}</b><br>Duration: %{y}m<br>Time > Target: %{customdata[1]}m<br>Avg %CIP: %{customdata[2]}%<extra></extra>"))
             first_date = df_all["Start"].min()
-            initial_view_end = first_date + timedelta(hours=24)
-            fig_timeline.update_layout(height=450, dragmode='pan', xaxis=dict(type='date', tickformat="%d %b %H:%M", range=[first_date, initial_view_end], rangeslider=dict(visible=True, thickness=0.05)), yaxis=dict(fixedrange=True), hovermode="closest", margin=dict(t=30, b=10, l=50, r=50))
-            st.plotly_chart(fig_timeline, use_container_width=True, key="main_timeline_chart", config={'scrollZoom': True})
+            fig_timeline.update_layout(height=450, dragmode='pan', xaxis=dict(type='date', range=[first_date, first_date + timedelta(hours=24)], rangeslider=dict(visible=True, thickness=0.05)), yaxis=dict(title="Min"), margin=dict(t=30, b=10, l=50, r=50))
+            st.plotly_chart(fig_timeline, use_container_width=True, config={'scrollZoom': True})
     
-    # --- โหมด Summary All Plant ---
     else:
         st.divider()
-        st.subheader("🌍 CIP Summary All Plant")
+        st.subheader("🌍 Summary All Plant (Interactive View)")
         for f_name in FACTORY_CONFIG.keys():
             f_data = st.session_state.results.get(f_name, [])
             if f_data:
                 st.markdown(f"### 🏭 Factory: {f_name}")
                 df_f = pd.DataFrame(f_data).sort_values("Start")
+                total_c, pass_c = len(df_f), len(df_f[df_f["Status"] == "PASS"])
+                rate = round((pass_c/total_c)*100, 1) if total_c > 0 else 0
                 fig_timeline = go.Figure()
                 for status, color in [("PASS", "#28a745"), ("FAIL", "#dc3545")]:
                     df_s = df_f[df_f["Status"] == status]
                     if not df_s.empty:
-                        fig_timeline.add_trace(go.Bar(
-                            x=df_s["Start"], y=df_s["TotalDuration"], name=status, marker_color=color,
-                            customdata=df_s[["Tank", "TimeAboveTarget", "AvgConc"]],
-                            hovertemplate="<b>Tank: %{customdata[0]}</b><br>Duration: %{y}m<br>Time > Target: %{customdata[1]}m<br>Avg %CIP: %{customdata[2]}%<extra></extra>"
-                        ))
+                        fig_timeline.add_trace(go.Bar(x=df_s["Start"], y=df_s["TotalDuration"], name=status, marker_color=color, customdata=df_s[["Tank", "TimeAboveTarget", "AvgConc"]], hovertemplate="<b>Tank: %{customdata[0]}</b><br>Duration: %{y}m<br>Time > Target: %{customdata[1]}m<br>Avg %CIP: %{customdata[2]}%<extra></extra>"))
                 first_date = df_f["Start"].min()
-                initial_view_end = first_date + timedelta(hours=24)
-                fig_timeline.update_layout(height=400, dragmode='pan', xaxis=dict(type='date', tickformat="%d %b %H:%M", range=[first_date, initial_view_end], rangeslider=dict(visible=True, thickness=0.05)), yaxis=dict(fixedrange=True, title="Duration (Min)"), hovermode="closest", margin=dict(t=30, b=10, l=50, r=50))
+                fig_timeline.update_layout(height=400, dragmode='pan', xaxis=dict(type='date', range=[first_date, first_date + timedelta(hours=24)], rangeslider=dict(visible=True, thickness=0.05)), yaxis=dict(fixedrange=True, title="Min"), margin=dict(t=30, b=10, l=50, r=50))
                 st.plotly_chart(fig_timeline, use_container_width=True, key=f"timeline_{f_name}", config={'scrollZoom': True})
+                st.markdown(f"""<div style="background:#fff; padding:12px; border-radius:10px; border:1px solid #eee; margin-top:-10px; margin-bottom:25px;"><span style="font-size:0.9em; font-weight:bold; color:#555;">📊 {f_name} Stats:</span> <span class="summary-badge" style="background:#1a73e8;">Total: {total_c}</span> <span class="summary-badge" style="background:#28a745;">Pass: {pass_c}</span> <span class="summary-badge" style="background:#dc3545;">Fail: {total_c-pass_c}</span> <span class="summary-badge" style="background:#f39c12;">Success: {rate}%</span></div>""", unsafe_allow_html=True)
                 st.divider()
 
 # --- 5. HISTORY EXPLORER ---
-if st.session_state.view_history:
+if st.session_state.view_history and st.session_state.view_history in st.session_state.results:
     sel = st.session_state.view_history
     db = st.session_state.results[sel]
     st.divider()
     st.subheader(f"📊 Detailed History: {sel} ({db['factory']})")
     hist_df = pd.DataFrame(db["list"]).sort_values("StartTime", ascending=False)
-    opt = st.selectbox("Select Cycle:", hist_df.apply(lambda x: f"{x['StartTime']} | {x['Status']}", axis=1).tolist())
-    r_data = hist_df[hist_df.apply(lambda x: f"{x['StartTime']} | {x['Status']}", axis=1) == opt].iloc[0]
+    # แสดงเป็น No. แทน Cycle
+    opt = st.selectbox("เลือกรายการลำดับที่ (No.):", hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1).tolist())
+    r_data = hist_df[hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1) == opt].iloc[0]
     
     fig_hist = make_subplots(specs=[[{"secondary_y": True}]])
     mask = (db["raw_temp"]["Time"] >= r_data["Start"] - timedelta(minutes=10)) & (db["raw_temp"]["Time"] <= r_data["End"] + timedelta(minutes=10))
-    
     fig_hist.add_trace(go.Scatter(x=db["raw_temp"].loc[mask, 'Time'], y=db["raw_temp"].loc[mask, 'Val'], name="Temp (°C)", line=dict(color="#e74c3c", width=3)))
-    
     if not db["raw_conc"].empty:
         conc_mask = (db["raw_conc"]["Time"] >= r_data["Start"] - timedelta(minutes=10)) & (db["raw_conc"]["Time"] <= r_data["End"] + timedelta(minutes=10))
         fig_hist.add_trace(go.Scatter(x=db["raw_conc"].loc[conc_mask, 'Time'], y=db["raw_conc"].loc[conc_mask, 'Val'], name="%CIP Conc", line=dict(color="#3498db", width=2, dash='dot')), secondary_y=True)
-    
-    fig_hist.add_hline(y=target_t, line_dash="dash", line_color="green", annotation_text=f"Target {target_t}°C")
-    fig_hist.update_layout(xaxis_title="Time", yaxis_title="Temperature (°C)", yaxis2_title="% CIP Concentration")
-    
+    fig_hist.update_layout(xaxis_title="Time", yaxis_title="Temp (°C)")
     st.plotly_chart(fig_hist, use_container_width=True)
     st.dataframe(hist_df.drop(columns=["Start", "End"]), use_container_width=True)
     if st.button("✖️ Close History"):
