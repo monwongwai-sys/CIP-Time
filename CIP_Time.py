@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import urllib3
 
-# ปิดคำเตือน SSL
+# Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 1. CONFIG & DATA STRUCTURE ---
@@ -104,12 +104,10 @@ def process_logic(temp_df, conc_df, target_t, min_m):
     history = []
     TRIGGER_TEMP, MIN_DURATION, GAP_MIN = 40.0, 5.0, 45
     if temp_df.empty: return []
-    
     if not conc_df.empty:
         combined_df = pd.merge_asof(temp_df.sort_values('Time'), conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), on='Time', direction='backward')
     else:
         combined_df = temp_df.copy(); combined_df['Conc'] = 0
-        
     raw_p, active, s_t = [], False, None
     for _, row in combined_df.iterrows():
         if row['Val'] > TRIGGER_TEMP and not active:
@@ -117,7 +115,6 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         elif row['Val'] <= TRIGGER_TEMP and active:
             raw_p.append({'Start': s_t, 'End': row['Time']})
             active = False
-            
     if not raw_p: return []
     merged, curr = [], raw_p[0]
     for next_p in raw_p[1:]:
@@ -126,22 +123,16 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         else: merged.append(curr); curr = next_p
     merged.append(curr)
     
-    # --- ปรับการนับลำดับใหม่ตรงนี้ ---
-    display_no = 1 
+    display_no = 1
     for p in merged:
         this_cycle = combined_df.loc[(combined_df['Time'] >= p['Start']) & (combined_df['Time'] <= p['End'])].copy()
         if this_cycle.empty: continue
-        
         this_cycle['diff'] = this_cycle['Time'].diff().dt.total_seconds() / 60
         above_target = this_cycle[this_cycle['Val'] >= target_t]
         acc_min = above_target['diff'].sum()
-        
-        # กรองรอบที่สั้นเกินไปออก
         if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
-        
         history.append({
-            "No": display_no, # เปลี่ยนจาก Cycle เป็น No และใช้ตัวนับใหม่
-            "Start": p['Start'], "End": p['End'],
+            "No": display_no, "Start": p['Start'], "End": p['End'],
             "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"),
             "TotalDuration": round((p['End'] - p['Start']).total_seconds() / 60, 1),
             "TimeAboveTarget": round(acc_min, 1),
@@ -151,8 +142,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
             "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2),
             "Status": "PASS" if acc_min >= min_m else "FAIL"
         })
-        display_no += 1 # เพิ่มลำดับเฉพาะเมื่อผ่านการกรองแล้ว
-        
+        display_no += 1
     return history
 
 # --- 3. UI & EXECUTION ---
@@ -173,7 +163,6 @@ if execute_btn:
     auth = HTTPBasicAuth(user, pw)
     st.session_state.results = {}
     st.session_state.view_history = None
-    
     if factory_choice != "Summary All Plant":
         f_conf = FACTORY_CONFIG[factory_choice]
         with st.spinner(f"🔄 Fetching data for {factory_choice}..."):
@@ -207,6 +196,8 @@ if execute_btn:
 if st.session_state.results:
     if "_is_summary" not in st.session_state.results:
         st.divider()
+        # Display specific plant name at top
+        st.subheader(f"🏭 Plant: {factory_choice}")
         cols = st.columns(4)
         for i, (name, data) in enumerate(st.session_state.results.items()):
             res = data["summary"]
@@ -282,10 +273,8 @@ if st.session_state.view_history and st.session_state.view_history in st.session
     st.divider()
     st.subheader(f"📊 Detailed History: {sel} ({db['factory']})")
     hist_df = pd.DataFrame(db["list"]).sort_values("StartTime", ascending=False)
-    # แสดงเป็น No. แทน Cycle
-    opt = st.selectbox("Select Item (No.):", hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1).tolist())
+    opt = st.selectbox("Select Item No.:", hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1).tolist())
     r_data = hist_df[hist_df.apply(lambda x: f"No. {x['No']} | {x['StartTime']} | {x['Status']}", axis=1) == opt].iloc[0]
-    
     fig_hist = make_subplots(specs=[[{"secondary_y": True}]])
     mask = (db["raw_temp"]["Time"] >= r_data["Start"] - timedelta(minutes=10)) & (db["raw_temp"]["Time"] <= r_data["End"] + timedelta(minutes=10))
     fig_hist.add_trace(go.Scatter(x=db["raw_temp"].loc[mask, 'Time'], y=db["raw_temp"].loc[mask, 'Val'], name="Temp (°C)", line=dict(color="#e74c3c", width=3)))
