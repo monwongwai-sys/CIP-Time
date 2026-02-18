@@ -10,32 +10,6 @@ import streamlit as st
 
 import streamlit as st
 
-# ใช้ CSS ขั้นสูงในการสั่ง "ลบ" (Display None) แบบเจาะจงจุด
-hide_st_style = """
-    <style>
-    /* 1. ลบปุ่ม Deploy (เรือกระดาษสีแดง) */
-    .stAppDeployButton {
-        display: none !important;
-    }
-
-    /* 2. ลบ Connection Status (ไอคอนสีฟ้าซ้ายมือ) */
-    [data-testid="stStatusWidget"] {
-        display: none !important;
-    }
-
-    /* 3. ลบแถบ Header ทั้งหมด รวมถึงเมนู 3 ขีด */
-    header {
-        visibility: hidden !important;
-        height: 0px !important;
-    }
-
-    /* 4. จัดการพื้นที่ว่างด้านบนที่เหลือจากการลบ Header */
-    .block-container {
-        padding-top: 0rem !important;
-    }
-    </style>
-"""
-
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
 st.write("ถ้า Code นี้ยังเอาไม่อยู่ แสดงว่าเราต้องใช้ไม้ตายสุดท้ายครับ")
