@@ -134,28 +134,25 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         this_cycle = combined_df.loc[mask].copy()
         if len(this_cycle) < 2: continue
 
-        # --- ส่วนคำนวณแบบ PI TimeGT (Resampling 10 วินาที เพื่อความแม่นยำสูงสุด) ---
         this_cycle = this_cycle.set_index('Time')
         this_cycle = this_cycle[~this_cycle.index.duplicated(keep='first')]
         
-        # ใช้ความถี่ 10 วินาทีเพื่อให้ใกล้เคียงเส้นกราฟที่สุด
+
         new_index = pd.date_range(start=p['Start'], end=p['End'], freq='10s')
         resampled = this_cycle.reindex(this_cycle.index.union(new_index)).interpolate(method='linear')
         resampled = resampled.reindex(new_index)
 
-        # คำนวณเวลาสะสม (10 วินาที = 1/6 นาที)
         acc_min = (resampled['Val'] >= target_t).sum() * (10/60) 
 
         if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
 
-        # ปรับการบันทึกค่าให้เป็นจำนวนเต็ม (int) ตามที่คุณต้องการ
         history.append({
             "No": display_no, 
             "Start": p['Start'], 
             "End": p['End'],
             "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"),
             "TotalDuration": int(round((p['End'] - p['Start']).total_seconds() / 60)),
-            "TimeAboveTarget": int(round(acc_min)), # จะออกมาเป็น 60 แทน 50.0 หรือ 60.0
+            "TimeAboveTarget": int(round(acc_min)), 
             "MaxTemp": int(round(this_cycle['Val'].max())),
             "AvgTemp": int(round(this_cycle['Val'].mean())),
             "AvgTempTarget": int(round(resampled[resampled['Val'] >= target_t]['Val'].mean() if not resampled[resampled['Val'] >= target_t].empty else 0)),
@@ -176,7 +173,7 @@ with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
         target_t = st.number_input("Target Temp (°C)", value=70.0)
     with c3:
         min_m = st.number_input("Target Duration (Min)", value=40.0)
-        s_dt = st.date_input("Start Date", value=datetime(2025, 12, 31))
+        s_dt = st.date_input("Start Date", value=datetime(2026, 1, 1))
     execute_btn = st.button("🚀 EXECUTE ANALYTICS", use_container_width=True)
 
 if execute_btn:
