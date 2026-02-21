@@ -104,10 +104,14 @@ def process_logic(temp_df, conc_df, target_t, min_m):
     history = []
     TRIGGER_TEMP, MIN_DURATION, GAP_MIN = 40.0, 5.0, 45
     if temp_df.empty: return []
+
     if not conc_df.empty:
-        combined_df = pd.merge_asof(temp_df.sort_values('Time'), conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), on='Time', direction='backward')
+        combined_df = pd.merge_asof(temp_df.sort_values('Time'), 
+                                    conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), 
+                                    on='Time', direction='backward')
     else:
         combined_df = temp_df.copy(); combined_df['Conc'] = 0
+
     raw_p, active, s_t = [], False, None
     for _, row in combined_df.iterrows():
         if row['Val'] > TRIGGER_TEMP and not active:
@@ -116,6 +120,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
             raw_p.append({'Start': s_t, 'End': row['Time']})
             active = False
     if not raw_p: return []
+
     merged, curr = [], raw_p[0]
     for next_p in raw_p[1:]:
         if (next_p['Start'] - curr['End']).total_seconds() / 60 <= GAP_MIN:
@@ -125,21 +130,36 @@ def process_logic(temp_df, conc_df, target_t, min_m):
     
     display_no = 1
     for p in merged:
-        this_cycle = combined_df.loc[(combined_df['Time'] >= p['Start']) & (combined_df['Time'] <= p['End'])].copy()
-        if this_cycle.empty: continue
-        this_cycle['diff'] = this_cycle['Time'].diff().dt.total_seconds() / 60
-        above_target = this_cycle[this_cycle['Val'] >= target_t]
-        acc_min = above_target['diff'].sum()
+        mask = (combined_df['Time'] >= p['Start']) & (combined_df['Time'] <= p['End'])
+        this_cycle = combined_df.loc[mask].copy()
+        if len(this_cycle) < 2: continue
+
+        # --- ส่วนคำนวณแบบ PI TimeGT (Resampling 10 วินาที เพื่อความแม่นยำสูงสุด) ---
+        this_cycle = this_cycle.set_index('Time')
+        this_cycle = this_cycle[~this_cycle.index.duplicated(keep='first')]
+        
+        # ใช้ความถี่ 10 วินาทีเพื่อให้ใกล้เคียงเส้นกราฟที่สุด
+        new_index = pd.date_range(start=p['Start'], end=p['End'], freq='10s')
+        resampled = this_cycle.reindex(this_cycle.index.union(new_index)).interpolate(method='linear')
+        resampled = resampled.reindex(new_index)
+
+        # คำนวณเวลาสะสม (10 วินาที = 1/6 นาที)
+        acc_min = (resampled['Val'] >= target_t).sum() * (10/60) 
+
         if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
+
+        # ปรับการบันทึกค่าให้เป็นจำนวนเต็ม (int) ตามที่คุณต้องการ
         history.append({
-            "No": display_no, "Start": p['Start'], "End": p['End'],
+            "No": display_no, 
+            "Start": p['Start'], 
+            "End": p['End'],
             "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"),
-            "TotalDuration": round((p['End'] - p['Start']).total_seconds() / 60, 1),
-            "TimeAboveTarget": round(acc_min, 1),
-            "MaxTemp": round(this_cycle['Val'].max(), 1),
-            "AvgTemp": round(this_cycle['Val'].mean(), 1),
-            "AvgTempTarget": round(above_target['Val'].mean() if not above_target.empty else 0, 1),
-            "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2),
+            "TotalDuration": int(round((p['End'] - p['Start']).total_seconds() / 60)),
+            "TimeAboveTarget": int(round(acc_min)), # จะออกมาเป็น 60 แทน 50.0 หรือ 60.0
+            "MaxTemp": int(round(this_cycle['Val'].max())),
+            "AvgTemp": int(round(this_cycle['Val'].mean())),
+            "AvgTempTarget": int(round(resampled[resampled['Val'] >= target_t]['Val'].mean() if not resampled[resampled['Val'] >= target_t].empty else 0)),
+            "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2), # %Conc อาจต้องเก็บทศนิยมไว้บ้าง
             "Status": "PASS" if acc_min >= min_m else "FAIL"
         })
         display_no += 1
