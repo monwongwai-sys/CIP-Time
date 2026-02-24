@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import urllib3
+import sqlite3  # <--- เพิ่มเข้ามาสำหรับ SQLite
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -60,6 +61,37 @@ FACTORY_CONFIG = {
     }
 }
 
+# --- 2. DATABASE FUNCTIONS ---
+def init_db():
+    conn = sqlite3.connect('cip_history.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS cip_logs
+                 (factory TEXT, tank TEXT, start_time TEXT, total_duration INTEGER, 
+                  time_above_target INTEGER, max_temp INTEGER, avg_temp INTEGER, 
+                  avg_temp_target INTEGER, avg_conc REAL, status TEXT, 
+                  UNIQUE(factory, tank, start_time))''')
+    conn.commit()
+    conn.close()
+
+def save_to_db(factory, tank, hist_list):
+    conn = sqlite3.connect('cip_history.db')
+    c = conn.cursor()
+    for h in hist_list:
+        try:
+            c.execute('''INSERT OR IGNORE INTO cip_logs 
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                      (factory, tank, h['StartTime'], h['TotalDuration'], 
+                       h['TimeAboveTarget'], h['MaxTemp'], h['AvgTemp'], 
+                       h['AvgTempTarget'], h['AvgConc'], h['Status']))
+        except Exception as e:
+            print(f"DB Insert Error: {e}")
+    conn.commit()
+    conn.close()
+
+# Initialize DB at start
+init_db()
+
+# --- CSS & SESSIONS ---
 if "results" not in st.session_state: st.session_state.results = {}
 if "view_history" not in st.session_state: st.session_state.view_history = None
 
@@ -137,7 +169,6 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         this_cycle = this_cycle.set_index('Time')
         this_cycle = this_cycle[~this_cycle.index.duplicated(keep='first')]
         
-
         new_index = pd.date_range(start=p['Start'], end=p['End'], freq='10s')
         resampled = this_cycle.reindex(this_cycle.index.union(new_index)).interpolate(method='linear')
         resampled = resampled.reindex(new_index)
@@ -156,7 +187,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
             "MaxTemp": int(round(this_cycle['Val'].max())),
             "AvgTemp": int(round(this_cycle['Val'].mean())),
             "AvgTempTarget": int(round(resampled[resampled['Val'] >= target_t]['Val'].mean() if not resampled[resampled['Val'] >= target_t].empty else 0)),
-            "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2), # %Conc อาจต้องเก็บทศนิยมไว้บ้าง
+            "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2),
             "Status": "PASS" if acc_min >= min_m else "FAIL"
         })
         display_no += 1
@@ -189,6 +220,7 @@ if execute_btn:
                 if not df_temp.empty:
                     hist = process_logic(df_temp, df_conc_all, target_t, min_m)
                     if hist:
+                        save_to_db(factory_choice, name, hist) # <--- บันทึกลง SQLite
                         passed = sum(1 for h in hist if h["Status"] == "PASS")
                         st.session_state.results[name] = {
                             "summary": hist[-1], "p_rate": round((passed/len(hist))*100, 1),
@@ -205,6 +237,7 @@ if execute_btn:
                     df_temp = get_data_pi(tag, auth, s_dt)
                     if not df_temp.empty:
                         hist = process_logic(df_temp, df_conc_all, target_t, min_m)
+                        if hist: save_to_db(f_name, name, hist) # <--- บันทึกลง SQLite
                         for h in hist:
                             h_copy = h.copy(); h_copy["Tank"] = name
                             st.session_state.results[f_name].append(h_copy)
@@ -213,7 +246,6 @@ if execute_btn:
 if st.session_state.results:
     if "_is_summary" not in st.session_state.results:
         st.divider()
-        # Display specific plant name at top
         st.subheader(f"🏭 Plant: {factory_choice}")
         cols = st.columns(4)
         for i, (name, data) in enumerate(st.session_state.results.items()):
