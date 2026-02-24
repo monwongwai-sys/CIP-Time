@@ -6,8 +6,9 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import urllib3
+from concurrent.futures import ThreadPoolExecutor
 
-# Disable SSL warnings
+# ปิดการแจ้งเตือน SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 1. CONFIG & DATA STRUCTURE ---
@@ -83,28 +84,37 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-def get_data_pi(tag_path, auth, start_time):
+# --- 2. CORE FUNCTIONS ---
+
+@st.cache_data(ttl=300)
+def get_data_pi(tag_path, _auth, start_time):
+    """ดึงข้อมูลจาก PI Web API พร้อมระบบ Cache เพื่อความเร็ว"""
     if not tag_path: return pd.DataFrame(columns=['Time', 'Val'])
     try:
         PI_BASE = "https://piazu.mitrphol.com/piwebapi"
-        r = requests.get(f"{PI_BASE}/points", params={"path": f"\\\\MPAZU-PIDCDB\\{tag_path}"}, auth=auth, verify=False, timeout=15)
-        if r.status_code != 200: return pd.DataFrame(columns=['Time', 'Val'])
-        webid = r.json()["WebId"]
-        start_str = start_time.strftime("%Y-%m-%dT00:00:00Z")
-        r_data = requests.get(f"{PI_BASE}/streams/{webid}/recorded", params={"startTime": start_str, "endTime": "*", "maxCount": 50000}, auth=auth, verify=False, timeout=25)
-        items = r_data.json().get("Items", [])
-        if not items: return pd.DataFrame(columns=['Time', 'Val'])
-        df = pd.DataFrame(items)
-        df['Time'] = pd.to_datetime(df['Timestamp'], format='ISO8601').dt.tz_convert('Asia/Bangkok').dt.tz_localize(None)
-        df['Val'] = pd.to_numeric(df['Value'].apply(lambda x: x.get('Value') if isinstance(x, dict) else x), errors='coerce')
-        return df[['Time', 'Val']].dropna().sort_values('Time')
+        with requests.Session() as session:
+            session.auth = _auth
+            session.verify = False
+            r = session.get(f"{PI_BASE}/points", params={"path": f"\\\\MPAZU-PIDCDB\\{tag_path}"}, timeout=10)
+            if r.status_code != 200: return pd.DataFrame(columns=['Time', 'Val'])
+            webid = r.json()["WebId"]
+            start_str = start_time.strftime("%Y-%m-%dT00:00:00Z")
+            r_data = session.get(f"{PI_BASE}/streams/{webid}/recorded", params={"startTime": start_str, "endTime": "*", "maxCount": 50000}, timeout=20)
+            items = r_data.json().get("Items", [])
+            if not items: return pd.DataFrame(columns=['Time', 'Val'])
+            df = pd.DataFrame(items)
+            df['Time'] = pd.to_datetime(df['Timestamp'], format='ISO8601').dt.tz_convert('Asia/Bangkok').dt.tz_localize(None)
+            df['Val'] = pd.to_numeric(df['Value'].apply(lambda x: x.get('Value') if isinstance(x, dict) else x), errors='coerce')
+            return df[['Time', 'Val']].dropna().sort_values('Time')
     except: return pd.DataFrame(columns=['Time', 'Val'])
 
 def process_logic(temp_df, conc_df, target_t, min_m):
+    """ประมวลผล Logic การล้าง CIP"""
     history = []
-    TRIGGER_TEMP, MIN_DURATION, GAP_MIN = 40.0, 5.0, 45
+    TRIGGER_TEMP, MIN_DURATION, GAP_MIN = 40, 5, 45
     if temp_df.empty: return []
 
+    # ปรับปรุงการ Merge %CIP ให้มีความเสถียรขึ้น
     if not conc_df.empty:
         combined_df = pd.merge_asof(temp_df.sort_values('Time'), 
                                     conc_df.sort_values('Time').rename(columns={'Val': 'Conc'}), 
@@ -119,6 +129,7 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         elif row['Val'] <= TRIGGER_TEMP and active:
             raw_p.append({'Start': s_t, 'End': row['Time']})
             active = False
+    
     if not raw_p: return []
 
     merged, curr = [], raw_p[0]
@@ -137,26 +148,23 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         this_cycle = this_cycle.set_index('Time')
         this_cycle = this_cycle[~this_cycle.index.duplicated(keep='first')]
         
-
         new_index = pd.date_range(start=p['Start'], end=p['End'], freq='10s')
         resampled = this_cycle.reindex(this_cycle.index.union(new_index)).interpolate(method='linear')
         resampled = resampled.reindex(new_index)
 
         acc_min = (resampled['Val'] >= target_t).sum() * (10/60) 
-
         if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
 
         history.append({
             "No": display_no, 
-            "Start": p['Start'], 
-            "End": p['End'],
+            "Start": p['Start'], "End": p['End'],
             "StartTime": p['Start'].strftime("%Y-%m-%d %H:%M"),
             "TotalDuration": int(round((p['End'] - p['Start']).total_seconds() / 60)),
             "TimeAboveTarget": int(round(acc_min)), 
             "MaxTemp": int(round(this_cycle['Val'].max())),
             "AvgTemp": int(round(this_cycle['Val'].mean())),
             "AvgTempTarget": int(round(resampled[resampled['Val'] >= target_t]['Val'].mean() if not resampled[resampled['Val'] >= target_t].empty else 0)),
-            "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 2), # %Conc อาจต้องเก็บทศนิยมไว้บ้าง
+            "AvgConc": round(this_cycle['Conc'].mean() if not this_cycle['Conc'].isna().all() else 0, 1),
             "Status": "PASS" if acc_min >= min_m else "FAIL"
         })
         display_no += 1
@@ -170,9 +178,9 @@ with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
         user, pw = st.text_input("Username", value=""), st.text_input("Password", type="password")
     with c2:
         factory_choice = st.selectbox("Select Factory", options=list(FACTORY_CONFIG.keys()) + ["Summary All Plant"], index=3)
-        target_t = st.number_input("Target Temp (°C)", value=70.0)
+        target_t = st.number_input("Target Temp (°C)", value=70)
     with c3:
-        min_m = st.number_input("Target Duration (Min)", value=40.0)
+        min_m = st.number_input("Target Duration (Min)", value=40)
         s_dt = st.date_input("Start Date", value=datetime(2026, 1, 1))
     execute_btn = st.button("🚀 EXECUTE ANALYTICS", use_container_width=True)
 
@@ -180,40 +188,48 @@ if execute_btn:
     auth = HTTPBasicAuth(user, pw)
     st.session_state.results = {}
     st.session_state.view_history = None
-    if factory_choice != "Summary All Plant":
-        f_conf = FACTORY_CONFIG[factory_choice]
-        with st.spinner(f"🔄 Fetching data for {factory_choice}..."):
-            df_conc_all = get_data_pi(f_conf["cip_tag"], auth, s_dt) if f_conf["cip_tag"] else pd.DataFrame(columns=['Time', 'Val'])
-            for name, tag in f_conf["tags"].items():
-                df_temp = get_data_pi(tag, auth, s_dt)
-                if not df_temp.empty:
-                    hist = process_logic(df_temp, df_conc_all, target_t, min_m)
-                    if hist:
-                        passed = sum(1 for h in hist if h["Status"] == "PASS")
-                        st.session_state.results[name] = {
-                            "summary": hist[-1], "p_rate": round((passed/len(hist))*100, 1),
-                            "total": len(hist), "pass": passed, "list": hist, 
-                            "raw_temp": df_temp, "raw_conc": df_conc_all, "factory": factory_choice
-                        }
-    else:
-        st.session_state.results = {"_is_summary": True}
-        for f_name, f_conf in FACTORY_CONFIG.items():
-            st.session_state.results[f_name] = []
-            with st.spinner(f"🔄 Fetching all data: {f_name}..."):
-                df_conc_all = get_data_pi(f_conf["cip_tag"], auth, s_dt) if f_conf["cip_tag"] else pd.DataFrame(columns=['Time', 'Val'])
-                for name, tag in f_conf["tags"].items():
-                    df_temp = get_data_pi(tag, auth, s_dt)
-                    if not df_temp.empty:
-                        hist = process_logic(df_temp, df_conc_all, target_t, min_m)
-                        for h in hist:
-                            h_copy = h.copy(); h_copy["Tank"] = name
-                            st.session_state.results[f_name].append(h_copy)
+
+    def fetch_factory_data(f_name):
+        f_conf = FACTORY_CONFIG[f_name]
+        # ดึงข้อมูล %CIP ก่อน (ใช้ _auth สำหรับ cache)
+        df_conc = get_data_pi(f_conf["cip_tag"], auth, s_dt)
+        tank_results = {}
+        for name, tag in f_conf["tags"].items():
+            df_temp = get_data_pi(tag, auth, s_dt)
+            if not df_temp.empty:
+                hist = process_logic(df_temp, df_conc, target_t, min_m)
+                if hist:
+                    passed = sum(1 for h in hist if h["Status"] == "PASS")
+                    tank_results[name] = {
+                        "summary": hist[-1], "p_rate": round((passed/len(hist))*100, 1),
+                        "total": len(hist), "pass": passed, "list": hist, 
+                        "raw_temp": df_temp, "raw_conc": df_conc, "factory": f_name
+                    }
+        return f_name, tank_results
+
+    factories_to_load = list(FACTORY_CONFIG.keys()) if factory_choice == "Summary All Plant" else [factory_choice]
+    
+    with st.spinner(f"🔄 กำลังดึงข้อมูลและวิเคราะห์แบบคู่ขนาน..."):
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_results = list(executor.map(fetch_factory_data, factories_to_load))
+        
+        if factory_choice != "Summary All Plant":
+            _, tank_data = future_results[0]
+            st.session_state.results = tank_data
+        else:
+            st.session_state.results = {"_is_summary": True}
+            for f_name, f_res in future_results:
+                st.session_state.results[f_name] = []
+                for tank_name, tank_info in f_res.items():
+                    for h in tank_info["list"]:
+                        h_copy = h.copy()
+                        h_copy["Tank"] = tank_name
+                        st.session_state.results[f_name].append(h_copy)
 
 # --- 4. DASHBOARD RENDER ---
 if st.session_state.results:
     if "_is_summary" not in st.session_state.results:
         st.divider()
-        # Display specific plant name at top
         st.subheader(f"🏭 Plant: {factory_choice}")
         cols = st.columns(4)
         for i, (name, data) in enumerate(st.session_state.results.items()):
