@@ -422,13 +422,14 @@ if st.session_state.results:
             for status, color in [("PASS","#28a745"),("FAIL","#dc3545")]:
                 ds = df_all[df_all["Status"]==status]
                 if not ds.empty:
-                    fig_tl.add_trace(go.Bar(x=ds["Start"], y=ds["TotalDuration"],
+                    fig_tl.add_trace(go.Bar(x=ds["Start"], y=[1]*len(ds),
                         name=status, marker_color=color,
-                        customdata=ds[["Tank","TimeAboveTarget","AvgConc"]],
-                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>Duration: %{y}m<br>Time > Target: %{customdata[1]}m<br>Avg %CIP: %{customdata[2]}%<extra></extra>"))
-            fig_tl.update_layout(height=450, dragmode='pan',
+                        customdata=ds[["Tank","TotalDuration","TimeAboveTarget","AvgConc","StartTime","End"]],
+                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %%CIP: %{customdata[3]}%%<extra></extra>"))
+            fig_tl.update_layout(height=300, dragmode='pan',
+                barmode='overlay',
                 xaxis=dict(type='date', rangeslider=dict(visible=True)),
-                yaxis=dict(title="Min"))
+                yaxis=dict(visible=False, range=[0, 1.5]))
             st.plotly_chart(fig_tl, use_container_width=True, config={'scrollZoom': True})
 
     else:
@@ -494,13 +495,14 @@ if st.session_state.results:
             for status, color in [("PASS","#28a745"),("FAIL","#dc3545")]:
                 ds = df_f[df_f["Status"]==status]
                 if not ds.empty:
-                    fig_tl.add_trace(go.Bar(x=ds["Start"], y=ds["TotalDuration"],
+                    fig_tl.add_trace(go.Bar(x=ds["Start"], y=[1]*len(ds),
                         name=status, marker_color=color,
-                        customdata=ds[["Tank","TimeAboveTarget","AvgConc"]],
-                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>Duration: %{y}m<br>Time > Target: %{customdata[1]}m<br>Avg %CIP: %{customdata[2]}%<extra></extra>"))
-            fig_tl.update_layout(height=400, dragmode='pan',
+                        customdata=ds[["Tank","TotalDuration","TimeAboveTarget","AvgConc","StartTime","End"]],
+                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %%CIP: %{customdata[3]}%%<extra></extra>"))
+            fig_tl.update_layout(height=300, dragmode='pan',
+                barmode='overlay',
                 xaxis=dict(type='date', rangeslider=dict(visible=True)),
-                yaxis=dict(title="Min"))
+                yaxis=dict(visible=False, range=[0, 1.5]))
             st.plotly_chart(fig_tl, use_container_width=True, key=f"tl_{f_name}", config={'scrollZoom': True})
             st.markdown(
                 f"""<div style="background:#fff;padding:12px;border-radius:10px;border:1px solid #eee;margin-top:-10px;margin-bottom:25px;">
