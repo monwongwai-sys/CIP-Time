@@ -124,12 +124,15 @@ def _save_cache(tag, date_str, df):
 # ============================================================
 PI_BASE = "https://piazu.mitrphol.com/piwebapi"
 
-def get_data_pi(tag_path, auth, start_time, max_retries=3):
+def get_data_pi(tag_path, auth, start_time, end_time=None, max_retries=3):
     if not tag_path:
         return pd.DataFrame(columns=['Time', 'Val'])
 
     date_str  = start_time.strftime("%Y-%m-%d") if hasattr(start_time, 'strftime') else str(start_time)
+    end_date_str = end_time.strftime("%Y-%m-%d") if end_time and hasattr(end_time, 'strftime') else "now"
+    date_str = f"{date_str}_to_{end_date_str}"
     start_str = start_time.strftime("%Y-%m-%dT00:00:00Z") if hasattr(start_time, 'strftime') else f"{start_time}T00:00:00Z"
+    end_str   = end_time.strftime("%Y-%m-%dT23:59:59Z") if end_time and hasattr(end_time, 'strftime') else "*"
 
     # check cache
     cached = _load_cache(tag_path, date_str)
@@ -151,7 +154,7 @@ def get_data_pi(tag_path, auth, start_time, max_retries=3):
             webid = r.json()["WebId"]
             r2 = requests.get(
                 f"{PI_BASE}/streams/{webid}/recorded",
-                params={"startTime": start_str, "endTime": "*", "maxCount": 50000},
+                params={"startTime": start_str, "endTime": end_str, "maxCount": 50000},
                 auth=auth, verify=False, timeout=45
             )
             items = r2.json().get("Items", [])
@@ -183,13 +186,13 @@ def get_data_pi(tag_path, auth, start_time, max_retries=3):
     return pd.DataFrame(columns=['Time', 'Val'])
 
 
-def fetch_all_tags_parallel(tag_dict, auth, start_time, max_workers=5):
+def fetch_all_tags_parallel(tag_dict, auth, start_time, end_time=None, max_workers=5):
     """Fetch all tanks in parallel"""
     results, errors = {}, {}
 
     def _one(item):
         name, tag = item
-        return name, get_data_pi(tag, auth, start_time)
+        return name, get_data_pi(tag, auth, start_time, end_time)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(_one, it): it for it in tag_dict.items()}
@@ -275,6 +278,7 @@ with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
     with c3:
         min_m = st.number_input("Target Duration (Min)", value=40.0)
         s_dt  = st.date_input("Start Date", value=datetime(2026, 1, 1))
+        e_dt  = st.date_input("End Date",   value=datetime.today())
 
     b1, b2 = st.columns([3, 1])
     with b1: execute_btn     = st.button("🚀 EXECUTE ANALYTICS", use_container_width=True)
@@ -304,11 +308,11 @@ if execute_btn:
                 f_conf = FACTORY_CONFIG[factory_choice]
 
                 sb.write(f"🧪 Fetching chemical data for {factory_choice}...")
-                df_conc = (get_data_pi(f_conf["cip_tag"], auth, s_dt)
+                df_conc = (get_data_pi(f_conf["cip_tag"], auth, s_dt, e_dt)
                            if f_conf["cip_tag"] else pd.DataFrame(columns=['Time', 'Val']))
 
                 sb.write(f"🌡️ Fetching {len(f_conf['tags'])} tanks in parallel...")
-                all_dfs, errs = fetch_all_tags_parallel(f_conf["tags"], auth, s_dt)
+                all_dfs, errs = fetch_all_tags_parallel(f_conf["tags"], auth, s_dt, e_dt)
                 if errs: st.session_state.fetch_errors = errs
 
                 for name, df_temp in all_dfs.items():
@@ -334,9 +338,9 @@ if execute_btn:
                 for f_name, f_conf in FACTORY_CONFIG.items():
                     sb.write(f"🏭 Fetching factory: {f_name}...")
                     st.session_state.results[f_name] = []
-                    df_conc = (get_data_pi(f_conf["cip_tag"], auth, s_dt)
+                    df_conc = (get_data_pi(f_conf["cip_tag"], auth, s_dt, e_dt)
                                if f_conf["cip_tag"] else pd.DataFrame(columns=['Time', 'Val']))
-                    all_dfs, _ = fetch_all_tags_parallel(f_conf["tags"], auth, s_dt)
+                    all_dfs, _ = fetch_all_tags_parallel(f_conf["tags"], auth, s_dt, e_dt)
                     for name, df_temp in all_dfs.items():
                         if not df_temp.empty:
                             for h in process_logic(df_temp, df_conc, target_t, min_m):
@@ -425,7 +429,7 @@ if st.session_state.results:
                     fig_tl.add_trace(go.Bar(x=ds["Start"], y=[1]*len(ds),
                         name=status, marker_color=color,
                         customdata=ds[["Tank","TotalDuration","TimeAboveTarget","AvgConc","StartTime","End"]],
-                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %%CIP: %{customdata[3]}%%<extra></extra>"))
+                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %CIP: %{customdata[3]}%<extra></extra>"))
             fig_tl.update_layout(height=300, dragmode='pan',
                 barmode='overlay',
                 xaxis=dict(type='date', rangeslider=dict(visible=True)),
@@ -498,7 +502,7 @@ if st.session_state.results:
                     fig_tl.add_trace(go.Bar(x=ds["Start"], y=[1]*len(ds),
                         name=status, marker_color=color,
                         customdata=ds[["Tank","TotalDuration","TimeAboveTarget","AvgConc","StartTime","End"]],
-                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %%CIP: %{customdata[3]}%%<extra></extra>"))
+                        hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %CIP: %{customdata[3]}%<extra></extra>"))
             fig_tl.update_layout(height=300, dragmode='pan',
                 barmode='overlay',
                 xaxis=dict(type='date', rangeslider=dict(visible=True)),
