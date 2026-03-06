@@ -211,11 +211,15 @@ def fetch_all_tags_parallel(tag_dict, auth, start_time, end_time=None, max_worke
 
 
 # ============================================================
-# PROCESS LOGIC (unchanged 100%)
+# PROCESS LOGIC
 # ============================================================
 def process_logic(temp_df, conc_df, target_t, min_m):
     history = []
-    TRIGGER_TEMP, MIN_DURATION, GAP_MIN = 40.0, 5.0, 45
+    TRIGGER_TEMP  = 40.0   # อุณหภูมิเริ่มนับว่าอาจเป็น CIP (°C)
+    MIN_DURATION  = 15.0   # ✅ ต้องสูงกว่า TRIGGER_TEMP ติดต่อกันอย่างน้อย 15 นาที
+                           #    จึงนับเป็น CIP cycle (กรองอุณหภูมิสูงชั่วคราว)
+    GAP_MIN       = 45     # ช่องว่างระหว่าง cycle ที่ถือว่ายังเป็น cycle เดียวกัน (นาที)
+
     if temp_df.empty: return []
 
     combined_df = (pd.merge_asof(temp_df.sort_values('Time'),
@@ -237,6 +241,9 @@ def process_logic(temp_df, conc_df, target_t, min_m):
     merged.append(curr)
 
     for no, p in enumerate(merged, 1):
+        # ✅ กรองทิ้ง: อุณหภูมิสูงชั่วคราว < 15 นาที ไม่ถือเป็น CIP
+        if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
+
         mask = (combined_df['Time'] >= p['Start']) & (combined_df['Time'] <= p['End'])
         cyc  = combined_df.loc[mask].copy()
         if len(cyc) < 2: continue
@@ -245,7 +252,6 @@ def process_logic(temp_df, conc_df, target_t, min_m):
         idx  = pd.date_range(start=p['Start'], end=p['End'], freq='10s')
         rs   = cyc.reindex(cyc.index.union(idx)).interpolate('linear').reindex(idx)
         acc  = (rs['Val'] >= target_t).sum() * (10 / 60)
-        if (p['End'] - p['Start']).total_seconds() / 60 < MIN_DURATION: continue
         above = rs[rs['Val'] >= target_t]
         history.append({
             "No": no, "Start": p['Start'], "End": p['End'],
@@ -422,16 +428,19 @@ if st.session_state.results:
                     if n != "_is_summary" for c in d["list"]]
         if all_data:
             df_all = pd.DataFrame(all_data).sort_values("Start")
+            BAR_WIDTH_MS = 90 * 60 * 1000  # 90 นาที คงที่ทุกแท่ง
             fig_tl = go.Figure()
             for status, color in [("PASS","#28a745"),("FAIL","#dc3545")]:
                 ds = df_all[df_all["Status"]==status]
                 if not ds.empty:
                     fig_tl.add_trace(go.Bar(x=ds["Start"], y=[1]*len(ds),
+                        width=BAR_WIDTH_MS,
                         name=status, marker_color=color,
                         customdata=ds[["Tank","TotalDuration","TimeAboveTarget","AvgConc","StartTime","End"]],
                         hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %CIP: %{customdata[3]}%<extra></extra>"))
             fig_tl.update_layout(height=300, dragmode='pan',
                 barmode='overlay',
+                bargap=0,
                 xaxis=dict(type='date', rangeslider=dict(visible=True)),
                 yaxis=dict(visible=False, range=[0, 1.5]))
             st.plotly_chart(fig_tl, use_container_width=True, config={'scrollZoom': True})
@@ -448,10 +457,16 @@ if st.session_state.results:
 
         if all_factory_data:
             df_all_f = pd.DataFrame(all_factory_data)
-            df_all_f["Month"] = pd.to_datetime(df_all_f["Start"]).dt.to_period("M").astype(str)
+            df_all_f["_period"] = pd.to_datetime(df_all_f["Start"]).dt.to_period("M")
+            df_all_f["Month"]   = df_all_f["_period"].dt.strftime("%b %Y")   # "Jan 2026"
+            # sort key เพื่อให้เรียงตามเวลาจริง
+            month_order = (df_all_f[["_period","Month"]].drop_duplicates()
+                           .sort_values("_period")["Month"].tolist())
             monthly = (df_all_f.groupby(["Factory","Month"])
                        .apply(lambda g: round(len(g[g["Status"]=="PASS"])/len(g)*100, 1))
                        .reset_index(name="%Pass"))
+            # เรียงตาม month_order
+            monthly["Month"] = pd.Categorical(monthly["Month"], categories=month_order, ordered=True)
             monthly = monthly.sort_values("Month")
 
             FACTORY_COLORS = {"PK1":"#1a73e8","PK2":"#e8711a",
@@ -495,16 +510,19 @@ if st.session_state.results:
             df_f = pd.DataFrame(f_data).sort_values("Start")
             tc, pc = len(df_f), len(df_f[df_f["Status"]=="PASS"])
             rate = round(pc/tc*100,1) if tc else 0
+            BAR_WIDTH_MS = 90 * 60 * 1000  # 90 นาที คงที่ทุกแท่ง
             fig_tl = go.Figure()
             for status, color in [("PASS","#28a745"),("FAIL","#dc3545")]:
                 ds = df_f[df_f["Status"]==status]
                 if not ds.empty:
                     fig_tl.add_trace(go.Bar(x=ds["Start"], y=[1]*len(ds),
+                        width=BAR_WIDTH_MS,
                         name=status, marker_color=color,
                         customdata=ds[["Tank","TotalDuration","TimeAboveTarget","AvgConc","StartTime","End"]],
                         hovertemplate="<b>Tank: %{customdata[0]}</b><br>🕒 Start: %{customdata[4]}<br>⏱️ Duration: %{customdata[1]}m<br>🌡️ Time > Target: %{customdata[2]}m<br>🧪 %CIP: %{customdata[3]}%<extra></extra>"))
             fig_tl.update_layout(height=300, dragmode='pan',
                 barmode='overlay',
+                bargap=0,
                 xaxis=dict(type='date', rangeslider=dict(visible=True)),
                 yaxis=dict(visible=False, range=[0, 1.5]))
             st.plotly_chart(fig_tl, use_container_width=True, key=f"tl_{f_name}", config={'scrollZoom': True})
