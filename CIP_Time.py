@@ -10,6 +10,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from requests.auth import HTTPBasicAuth   # ← restored to original
+from requests_ntlm import HttpNtlmAuth
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -203,6 +204,9 @@ def fetch_all_tags_parallel(tag_dict, auth, start_time, end_time=None, max_worke
                     errors[name] = df['_error'].iloc[0]
                     results[name] = pd.DataFrame(columns=['Time', 'Val'])
                 else:
+                    # ✅ กรองอุณหภูมิที่ > 100°C ทิ้ง (ค่า sensor ผิดปกติ ไม่นำมาคิด)
+                    if not df.empty:
+                        df = df[df['Val'] <= 100].reset_index(drop=True)
                     results[name] = df
             except Exception as e:
                 n = futs[fut][0]; errors[n] = str(e)
@@ -275,7 +279,7 @@ st.title("🛡️ CIP Performance Monitoring & Analytics")
 with st.expander("📂 SYSTEM ACCESS & SETTINGS", expanded=True):
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        user = st.text_input("Username", key="user")
+        user = st.text_input("Username", key="user", help="สำหรับ NTLM ให้ใส่ในรูปแบบ DOMAIN\\username")
         pw   = st.text_input("Password", type="password", key="pw")
     with c2:
         factory_choice = st.selectbox("Select Factory",
@@ -303,7 +307,7 @@ if execute_btn:
     if not user or not pw:
         st.error("Please enter Username and Password")
     else:
-        auth = HTTPBasicAuth(user, pw)   # ← same as original, no domain needed
+        auth = HttpNtlmAuth(user, pw)   # ← NTLM auth (รองรับ user แบบ DOMAIN\\username)
         st.session_state.results      = {}
         st.session_state.view_history = None
         st.session_state.fetch_errors = []
